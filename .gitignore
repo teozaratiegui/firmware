@@ -8,7 +8,7 @@
 src/secrets.h
 **/secrets.h
 
-# Generated at build time by scripts/mqtt_node_env.py
-src/config/mqtt_node_config.h
+# Generated at build time by scripts/direct_node_id.py
+src/config/direct_node_id.h
 
 .DS_Store

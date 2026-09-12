@@ -155,8 +155,11 @@ void R200::handleFrame() {
 
     case CMD_SinglePollInstruction:
     case CMD_MultiplePollInstruction: {
-      // Response: RSSI(1) PC(2) EPC(12) CRC(2) — 17 parameter bytes.
-      if (declaredParamLength() < kEpcOffset - R200_ParamPos + kEpcLength) break;
+      // Response: RSSI(1) PC(2) EPC(12) CRC(2) — 17 parameter bytes. The guard
+      // used to ask for 15, the EPC alone, contradicting the line above it: a
+      // frame declaring 15 or 16 passed and produced a UID whose tail came out
+      // of the CRC slot. Now it asks for the whole answer.
+      if (declaredParamLength() < kInventoryParamLength) break;
       if (memcmp(uid, &_buffer[kEpcOffset], kEpcLength) != 0) {
         memcpy(uid, &_buffer[kEpcOffset], kEpcLength);
 #ifdef R200_DEBUG

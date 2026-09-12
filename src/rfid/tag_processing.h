@@ -4,9 +4,8 @@
 
 #include "Cache.h"
 #include "MessageGateway.h"
+#include "R200.h"
 #include "config/app_config.h"
-
-class R200;
 
 namespace rfid {
 
@@ -29,12 +28,13 @@ class TagProcessor {
   uint32_t accepted() const { return accepted_; }
 
  private:
-  R200&                          reader_;
-  MessageGateway&                gateway_;
-  Cache<kTagCacheCapacity>       cache_;
-  uint32_t                       lastSkipLogMs_    = 0;
-  uint32_t                       accepted_         = 0;
-  bool                           tagPresent_       = false;
+  R200&           reader_;
+  MessageGateway& gateway_;
+  // The UID length is the reader's, not a configurable one — see R200::kEpcLength.
+  Cache<kTagCacheCapacity, R200::kEpcLength> cache_;
+  uint32_t                                   lastSkipLogMs_ = 0;
+  uint32_t                                   accepted_      = 0;
+  bool                                       tagPresent_    = false;
 };
 
 }  // namespace rfid

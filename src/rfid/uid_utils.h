@@ -1,26 +1,48 @@
 #pragma once
 
 #include <Arduino.h>
+#include <stddef.h>
 #include <string.h>
 
-#include "config/app_config.h"
+// -----------------------------------------------------------------------------
+//  Helpers for the raw EPC the reader hands over.
+//
+//  Each one takes the UID as a reference to an array and reads its length from
+//  the type. Until v0.2 they read a UID_LEN macro instead, which is what let
+//  the length diverge: the macro was declared in two headers behind their own
+//  #ifndef, so the include order picked the winner, and a helper walked twelve
+//  bytes over whatever buffer it was handed. Deducing the length means the
+//  buffer and the loop bound can no longer disagree, and comparing UIDs of
+//  different lengths is a build error instead of a read past the end of the
+//  shorter one.
+//
+//  The length itself belongs to the reader: R200::kEpcLength.
+// -----------------------------------------------------------------------------
 
-inline bool sameUid(const uint8_t* a, const uint8_t* b) {
-  return memcmp(a, b, UID_LEN) == 0;
+template <size_t N>
+inline bool sameUid(const uint8_t (&a)[N], const uint8_t (&b)[N]) {
+  return memcmp(a, b, N) == 0;
 }
 
-inline void copyUid(uint8_t* dst, const uint8_t* src) {
-  memcpy(dst, src, UID_LEN);
+template <size_t N>
+inline void copyUid(uint8_t (&dst)[N], const uint8_t (&src)[N]) {
+  memcpy(dst, src, N);
 }
 
-inline bool isZeroUid(const uint8_t* uid) {
-  static const uint8_t kZero[UID_LEN] = {0};
-  return sameUid(uid, kZero);
+/** All-zero is how the driver reports "no tag in the field". */
+template <size_t N>
+inline bool isZeroUid(const uint8_t (&uid)[N]) {
+  for (size_t i = 0; i < N; ++i) {
+    if (uid[i] != 0) return false;
+  }
+  return true;
 }
 
-inline String toUidString(const uint8_t* uid) {
+template <size_t N>
+inline String toUidString(const uint8_t (&uid)[N]) {
   String s;
-  for (uint8_t i = 0; i < UID_LEN; i++) {
+  s.reserve(N * 2);
+  for (size_t i = 0; i < N; i++) {
     if (uid[i] < 0x10) s += '0';
     s += String(uid[i], HEX);
   }

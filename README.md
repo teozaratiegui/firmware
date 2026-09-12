@@ -166,9 +166,10 @@ quotes escaped (`\"…\"`), because PlatformIO strips one level when it splits t
 without the backslashes the preprocessor sees a bare `192.168.0.20` and the build fails
 with *too many decimal points in number*.
 
-`NODE_ID` is an **environment variable**, not a build flag: `scripts/mqtt_node_env.py`
-writes it into `src/config/mqtt_node_config.h` before each build. It is only the fallback
-label used by the direct-to-Lambda mode — over MQTT the gateway assigns the real id.
+`NODE_ID` is an **environment variable**, not a build flag: `scripts/direct_node_id.py`
+writes it into `src/config/direct_node_id.h` before each build, as `DIRECT_NODE_ID`. It
+labels the direct-to-Lambda mode only — over MQTT the gateway assigns the real id, so
+setting `NODE_ID` does nothing in the default configuration.
 
 ---
 

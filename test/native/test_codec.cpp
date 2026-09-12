@@ -14,8 +14,9 @@
 //  ArduinoJson can be found (see run.sh), so `./test/native/run.sh` keeps
 //  working on a machine that has never run PlatformIO.
 //
-//  The payloads below are the shapes the gateway states in
-//  thesis-sketch/src/core/contracts/gateway.py:43-102.
+//  The payloads below are the shapes thesis-sketch/doc/node-manual.md states
+//  in its "Contrato de mensajes" section — cited by section rather than by line
+//  number, because that file lives in another repository.
 // =============================================================================
 #include "test_support.h"
 
@@ -50,7 +51,7 @@ int main() {
 
   SECTION("codec: a tag read is exactly the shape the gateway parses");
   {
-    // gateway_adapter.py:78-81 reads "tag" and "node_key"; nothing else.
+    // GatewayMqttAdapter._handle_relay reads "tag" and "node_key"; nothing else.
     const String payload = messages::tagRead("E280110C", "a1b2c3", "2026-09-12T14:03:07Z");
     CHECK(equals(payload,
                  "{\"tag\":\"E280110C\",\"node_key\":\"a1b2c3\",\"ts\":\"2026-09-12T14:03:07Z\"}"));
@@ -132,7 +133,7 @@ int main() {
     CHECK(allowed.message.isEmpty());
     CHECK(allowed.error.isEmpty());
 
-    // The shape relay_tag_read.py returns for a node whose credentials are dead.
+    // The shape RelayTagRead returns for a node whose credentials are dead.
     const GatewayResponse denied =
         GatewayResponse::parse("{\"status\": 403, \"error\": \"unauthorized\"}");
     CHECK(denied.valid);
@@ -169,6 +170,30 @@ int main() {
     CHECK(!GatewayResponse::parse("{\"status\":\"200\"}").valid);
     // And a field that merely mentions the word is not the field.
     CHECK(!GatewayResponse::parse("{\"note\":\"status 200 was expected\"}").valid);
+  }
+
+  SECTION("codec: only 200 and 204 open the door");
+  {
+    // The gateway normalises the Lambda's 201 to 200 before it answers
+    // (RelayTagRead, and node-manual.md § "Tabla de respuestas"), so a
+    // 201 arriving here means the contract was bypassed and is not a grant.
+    // 422 is the one that matters most: it is how a *refused* tag is reported
+    // since the Cloud moved DENY off 403, and 403 now means the node's own
+    // credentials are dead.
+    GatewayResponse r;
+    r.status = 200;
+    CHECK(r.accessGranted());
+    r.status = 204;
+    CHECK(r.accessGranted());
+    r.status = 201;
+    CHECK(!r.accessGranted());
+    for (int refused : {400, 401, 403, 404, 422, 500, 503}) {
+      r.status = refused;
+      CHECK(!r.accessGranted());
+    }
+    // A response that never parsed carries status 0 and must not grant either.
+    CHECK(!GatewayResponse().accessGranted());
+    CHECK(!GatewayResponse::parse("garbage").accessGranted());
   }
 
   SECTION("codec: describe() names every status the contract can produce");

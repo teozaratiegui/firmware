@@ -126,7 +126,7 @@ void setup() {
 #else
   // The direct-to-Lambda path has no registration handshake: it authenticates
   // with the Cloud API key and labels itself with the build-time node id.
-  node->gateway.setIdentity(MQTT_NODE_ID, "");
+  node->gateway.setIdentity(DIRECT_NODE_ID, "");
 #endif
   node->gateway.begin();
 #else

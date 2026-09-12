@@ -13,6 +13,7 @@
 #include <cstring>
 #include <deque>
 #include <string>
+#include <vector>
 
 typedef uint8_t byte;
 
@@ -66,8 +67,8 @@ class String {
   String& operator+=(const char* c) { s_ += c; return *this; }
   String& operator+=(const String& o) { s_ += o.s_; return *this; }
   // ArduinoJson's writer appends through concat(); the real Arduino String has
-  // it, and the codec test (test/native/run.sh --with-json) needs it to build
-  // the real GatewayMessages.cpp against ArduinoJson.
+  // it, and the codec binary run.sh builds when ArduinoJson is on disk needs it
+  // to compile the real GatewayMessages.cpp against ArduinoJson.
   bool concat(char c) { s_ += c; return true; }
   bool concat(const char* c) { if (c) s_ += c; return true; }
   bool concat(const String& o) { s_ += o.s_; return true; }
@@ -116,15 +117,31 @@ class HardwareSerial : public Print {
   }
   size_t write(const uint8_t* data, size_t len) {
     tx.insert(tx.end(), data, data + len);
+    // Deliver an armed answer, if any: see replyOnWrite().
+    if (!reply.empty()) {
+      rx.insert(rx.end(), reply.begin(), reply.end());
+      reply.clear();
+    }
     return len;
   }
   void flush() {}
 
   void feed(const uint8_t* data, size_t len) { rx.insert(rx.end(), data, data + len); }
-  void reset() { rx.clear(); tx.clear(); }
 
-  std::deque<uint8_t> rx;
-  std::deque<uint8_t> tx;
+  /**
+   * Arms a reply to be delivered on the next write().
+   *
+   * linkTest() drains the RX buffer and *then* waits for an answer to the probe
+   * it just sent, so a pre-loaded frame is thrown away before it can be read.
+   * This is the only way to stand in for a reader that talks back.
+   */
+  void replyOnWrite(const uint8_t* data, size_t len) { reply.assign(data, data + len); }
+
+  void reset() { rx.clear(); tx.clear(); reply.clear(); }
+
+  std::deque<uint8_t>  rx;
+  std::deque<uint8_t>  tx;
+  std::vector<uint8_t> reply;
 };
 
 extern HardwareSerial Serial;

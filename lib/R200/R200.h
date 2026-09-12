@@ -22,8 +22,32 @@ class R200 {
  public:
   R200();
 
+  /**
+   * Length of the EPC the reader reports, in bytes.
+   *
+   * The single source of truth for every buffer that carries a UID: the length
+   * is fixed by the reader's inventory frame, so it is not a build-time
+   * preference. Until v0.2 a UID_LEN macro was declared both in
+   * src/config/app_config.h and in lib/Cache/Cache.h, each behind its own
+   * #ifndef, and the include order decided which one won.
+   */
+  static constexpr uint8_t kEpcLength = 12;
+
+  /**
+   * A stale `-DUID_LEN` from a v0.1 build script would otherwise sit in the
+   * flags meaning nothing, since no code reads the macro any more. Asserting
+   * here rather than in src/config/app_config.h keeps the configuration header
+   * free of any dependency on the driver, and still fires for every
+   * translation unit that handles a UID — they all include this one.
+   */
+#ifdef UID_LEN
+  static_assert(UID_LEN == kEpcLength,
+                "UID_LEN is no longer a build switch: the EPC length comes from the reader "
+                "(R200::kEpcLength). Drop -DUID_LEN from the build flags.");
+#endif
+
   /** Last EPC seen, all zeros when no tag is in the field. */
-  uint8_t uid[12] = {0};
+  uint8_t uid[kEpcLength] = {0};
 
   bool begin(HardwareSerial* serial = &Serial2, int baud = 115200, uint8_t rxPin = 16,
              uint8_t txPin = 17);
@@ -112,11 +136,15 @@ class R200 {
   };
 
  private:
-  static constexpr uint8_t  kEpcLength      = 12;
   // Inventory answer: AA 02 22 PL_H PL_L RSSI PC PC EPC(12) CRC CRC CHK DD.
   // The EPC therefore starts at byte 8, after the 5-byte preamble, RSSI and PC.
   // v0.1 read from byte 9 and shifted every EPC it ever reported by one byte.
-  static constexpr uint8_t  kEpcOffset      = 8;
+  static constexpr uint8_t  kEpcOffset    = 8;
+  static constexpr uint8_t  kEpcCrcLength = 2;   // CRC-16 over the EPC, right after it
+  // RSSI(1) PC(2) EPC(12) CRC(2) = 17: what a complete inventory answer declares.
+  // Anything shorter cannot hold an EPC *and* its CRC, so it is not an answer.
+  static constexpr uint16_t kInventoryParamLength =
+      (kEpcOffset - R200_ParamPos) + kEpcLength + kEpcCrcLength;
   static constexpr uint16_t kMinFrameLength = 7;   // header + 4 + checksum + end
 
   /** Parameter count declared by the frame, clamped to what actually arrived. */

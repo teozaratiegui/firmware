@@ -19,17 +19,22 @@ still passes.
 
 | File | Subject |
 | --- | --- |
-| `test_cache.cpp` | Per-UID cooldown, capacity and LRU eviction of the debounce cache |
-| `test_r200.cpp` | Frame decoding: valid answers, truncation, bad checksums, hostile lengths, an EPC containing the frame-end byte |
-| `test_uid.cpp` | UID formatting and comparison helpers |
+| `test_cache.cpp` | Per-UID cooldown, capacity and LRU eviction of the debounce cache; the cooldown across the `millis()` rollover; that the UID length is part of the cache's type |
+| `test_r200.cpp` | Frame decoding: valid answers, truncation, bad checksums, hostile lengths, an EPC containing the frame-end byte, an answer too short to hold one. Also the frames it emits — all four command checksums recomputed — and `linkTest()`: pass, corrupt answer, and bounded give-up when nothing is wired |
+| `test_uid.cpp` | UID formatting and comparison helpers, and that each one takes its length from the buffer it was handed rather than from a macro |
 | `test_gateway.cpp` | The uplink across a reconnection (link generation, presence, subscriptions, last will), the outbox retry policy, the telemetry topic fallback |
 | `test_registrar.cpp` | The registration state machine: the attempt budget and what renews it, adoption of issued credentials, the once-per-boot revalidation |
 | `test_access.cpp` | Which physical output each gateway status drives, and the granted / denied / degraded split |
 | `test_codec.cpp` | *(needs ArduinoJson)* The real `GatewayMessages.cpp`: the exact JSON the node publishes, and what it accepts and rejects from the gateway |
 
 Several of these are regression tests for bugs that were live in v0.1 — a checksum loop
-that never terminated, an EPC read one byte off, frames truncated at the first `0xDD`.
-They are here so those cannot come back quietly.
+that never terminated, an EPC read one byte off, frames truncated at the first `0xDD`, UID
+helpers that walked twelve bytes over whatever buffer they were given. They are here so
+those cannot come back quietly.
+
+A few checks are compile-time rather than runtime: `static_assert`s that a `Cache` or a UID
+helper *rejects* a buffer of the wrong length. They are mirrored as `CHECK`s so they show
+up in the count, but what they really assert is that the mismatch cannot be built at all.
 
 ## Why the codec is tested twice
 

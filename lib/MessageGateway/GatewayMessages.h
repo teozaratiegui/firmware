@@ -7,18 +7,31 @@
 //  Every JSON shape the node produces or consumes lives here, so a contract
 //  change is a one-file change.
 //
+//  The Fog side is owned by another repository, so it is cited by the name of
+//  the thing rather than by line number: line numbers in someone else's repo
+//  drift silently and nobody finds out. The authority is
+//  thesis-sketch/doc/node-manual.md, section "Contrato de mensajes".
+//
 //  Fog (MQTT), node -> gateway, topic <node prefix>/<node_id>/requests:
 //      {"tag":"<epc>","node_key":"<key>"[,"ts":"<iso8601>"]}
-//      thesis-sketch/src/infrastructure/mqtt/gateway_adapter.py:78-81
+//      node-manual.md § "Request (nodo publica)"; read by
+//      GatewayMqttAdapter._handle_relay into RelayTagReadCommand, which takes
+//      only `tag` and `node_key`. `ts` is dropped there and reaches nobody
+//      today: the Cloud does accept a clientTimestamp, but the gateway still
+//      posts `{"tag"}` alone (finding G1). The node sends it anyway so that
+//      closing that gap stays a gateway-only change.
 //  Fog (MQTT), gateway -> node, topic <node prefix>/<node_id>/responses:
 //      {"status":<int>[,"message":"..."][,"error":"..."]}
-//      thesis-sketch/src/core/contracts/gateway.py:43-59
+//      node-manual.md § "Response (gateway publica)" and § "Tabla de
+//      respuestas"; built by NodeResponse in core/contracts/gateway.py.
 //  Fog (MQTT), registration on <gateway prefix>/register and
 //      <gateway prefix>/register/response/<MAC>:
 //      {"api_key":"...","mac":"AA:BB:.."} -> {"node_id":"..","node_key":".."}
-//      thesis-sketch/src/core/contracts/gateway.py:75-102
+//      node-manual.md § "Registro del nodo"; RegisterRequest and
+//      RegisterResponse in core/contracts/gateway.py.
 //  Cloud (HTTPS), node -> Lambda Function URL (Fog bypassed):
 //      {"tag":"<epc>","nodeId":"<id>","timestamp":"<iso8601>"}
+//      IaC-multi-tenant-system, the access_control handler's index.js.
 // -----------------------------------------------------------------------------
 
 /** Answer published by the gateway on <node prefix>/<node_id>/responses. */
@@ -31,7 +44,7 @@ struct GatewayResponse {
   /** 200 and 204 are the two "let them through" outcomes of the contract. */
   bool accessGranted() const { return status == 200 || status == 204; }
 
-  /** Human-readable meaning of the status, per doc/node-manual.md. */
+  /** Human-readable meaning of the status, per node-manual.md § "Tabla de respuestas". */
   const char* describe() const;
 
   static GatewayResponse parse(const String& json);
