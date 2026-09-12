@@ -2,71 +2,183 @@
 
 #include <Arduino.h>
 
+#include "config/mqtt_node_config.h"
+
+// =============================================================================
+//  Compile-time configuration for the Edge node (ESP32 + R200 UHF reader).
+//
+//  Everything here is fixed at build time. There is no runtime configuration
+//  channel yet: the gateway exposes no downlink topic for node config
+//  (gateway finding G7).
+// =============================================================================
+
+// ── Build identity ───────────────────────────────────────────────────────────
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "0.2.0"
+#endif
+
+// ── Run mode ─────────────────────────────────────────────────────────────────
+//  SYSTEM_MODE_RFID            R200 powered up; tag reads are relayed upstream.
+//  SYSTEM_MODE_GATEWAY_INTERVAL  R200 not initialised; telemetry only.
+//  In BOTH modes the node registers with the gateway and emits telemetry on
+//  <node prefix>/<node_id>/telemetry — the mode only decides whether the
+//  reader is driven.
+#define SYSTEM_MODE_RFID             0
+#define SYSTEM_MODE_GATEWAY_INTERVAL 1
+
+#ifndef SYSTEM_MODE
+#define SYSTEM_MODE SYSTEM_MODE_RFID
+#endif
+
+// ── Uplink ───────────────────────────────────────────────────────────────────
+// MESSAGE_GATEWAY   0 disables the uplink entirely (serial-only bring-up).
+// GATEWAY_USE_MQTT  1 = MQTT to the Fog gateway (the production path).
+//                   0 = HTTPS straight to the Lambda Function URL, bypassing
+//                       the Fog layer. Kept on purpose as the A/B test bench
+//                       for measuring what the Fog layer contributes.
+#ifndef MESSAGE_GATEWAY
+#define MESSAGE_GATEWAY 1
+#endif
+
+#ifndef GATEWAY_USE_MQTT
+#define GATEWAY_USE_MQTT 1
+#endif
+
+#if SYSTEM_MODE == SYSTEM_MODE_GATEWAY_INTERVAL && !MESSAGE_GATEWAY
+#error "SYSTEM_MODE_GATEWAY_INTERVAL requires MESSAGE_GATEWAY=1 (it has no other output)."
+#endif
+
+// ── R200 driver ──────────────────────────────────────────────────────────────
 #ifndef UID_LEN
 #define UID_LEN 12
 #endif
 
 #ifndef R200_LINK_TEST
-#define R200_LINK_TEST 1
+#define R200_LINK_TEST 1        // UART sanity check at boot (GetModuleInfo + CRC)
 #endif
 
 #ifndef USE_CONTINUOUS_POLL
-#define USE_CONTINUOUS_POLL 0
+#define USE_CONTINUOUS_POLL 0   // 0 = single poll every kPollIntervalMs
 #endif
 
-#ifndef MESSAGE_GATEWAY
-#define MESSAGE_GATEWAY 1
-#endif
-
-// 0 = HTTPS Lambda only · 1 = MQTT — independent of SYSTEM_MODE_RFID / SYSTEM_MODE_GATEWAY_INTERVAL
-#ifndef GATEWAY_USE_MQTT
-#define GATEWAY_USE_MQTT 1
-#endif
-
-// ── R200 UART (Serial2) ──────────────────────────────────────────────
+// R200 UART (Serial2)
 #define R200_RX_PIN 17
 #define R200_TX_PIN 16
 #define R200_BAUD   115200
 
-// ── Timing ────────────────────────────────────────────────────────────
-static const uint32_t kPollIntervalMs     = 350;
-static const uint32_t kMainLoopIntervalMs   = 60;
-static const uint32_t kTagCooldownMs        = 5000;
-static const uint32_t kGarbageLogIntervalMs = 5000;
-static const uint32_t kCacheSkipLogIntervalMs = 3000;
-static const uint32_t kHeartbeatIntervalMs  = 5000;
+// ── Timing ───────────────────────────────────────────────────────────────────
+static constexpr uint32_t kPollIntervalMs          = 350;
+static constexpr uint32_t kMainLoopIntervalMs      = 60;
+static constexpr uint32_t kTagCooldownMs           = 5000;   // per-UID debounce
+static constexpr uint32_t kCacheSkipLogIntervalMs  = 3000;
+static constexpr uint32_t kTelemetryIntervalMs     = 30000;
+static constexpr uint32_t kWifiConnectTimeoutMs    = 30000;
+static constexpr uint32_t kWifiRetryIntervalMs     = 10000;
 
-static constexpr uint8_t kTagCacheCapacity = 16;
+static constexpr uint8_t  kTagCacheCapacity = 16;
 
-#include "config/mqtt_node_config.h"
+// How many reads the outbox holds while the uplink is down. Unrelated to the
+// debounce cache above — that one bounds how many distinct UIDs are tracked,
+// this one how long an outage the node can ride out — although both were the
+// same constant until v0.2.
+static constexpr uint8_t  kOutboxCapacity   = 16;
 
-// ── Gateway: MQTT (used when GATEWAY_USE_MQTT is 1) ─────────────────────
-// Topics: publish → kMqttTopicPrefix "<node_id>/requests", subscribe → ".../<node_id>/responses"
-// <node_id> = MQTT_NODE_ID (scripts/mqtt_node_env.py + env NODE_ID, or edit mqtt_node_config.h)
-static constexpr const char kMqttTopicPrefix[] = "bicicletero/esp/";
-// LAN IP of the PC running Mosquitto/Docker — same subnet as the ESP32 (see ipconfig on "Wi‑Fi 2" or your active adapter).
-// Example: PC 192.168.49.28 + ESP32 192.168.49.x → use 192.168.49.28 here (not localhost). Update if DHCP changes your PC IP.
-static constexpr const char kMqttHost[]        = "192.168.49.28";
-static constexpr uint16_t   kMqttPort          = 1883;
-static constexpr const char kMqttClientId[]    = "esp32-r200";
-static constexpr bool       kMqttRetain        = false;
-// Leave empty for anonymous broker; set here or prefer secrets for shared repos
-static constexpr const char kMqttUser[]        = "";
-static constexpr const char kMqttPass[]        = "";
-
-// ── Run mode (what you are building) ───────────────────────────────────
-// Values (do not change these lines):
-#define SYSTEM_MODE_RFID 0                 // R200 on: tags → MESSAGE_GATEWAY when cache accepts
-#define SYSTEM_MODE_GATEWAY_INTERVAL 1    // R200 off: only timed telemetry → MESSAGE_GATEWAY
+// ── MQTT topics ──────────────────────────────────────────────────────────────
+//  Node   → gateway : <kNodePrefix>/<node_id>/requests
+//  Gateway→ node    : <kNodePrefix>/<node_id>/responses
+//  Node   → (nobody yet) : <kNodePrefix>/<node_id>/telemetry   [see G7]
+//  Node LWT/presence     : <kNodePrefix>/<MAC>/status (retained)
+//  Registration     : <kGatewayPrefix>/register
+//                     <kGatewayPrefix>/register/response/<MAC>
 //
-// Pick behaviour: keep exactly one of the two `#define SYSTEM_MODE ...` lines below active.
-// (Or skip this block entirely and pass from platformio.ini: build_flags = '-DSYSTEM_MODE=1'
-//  which is the same value as SYSTEM_MODE_GATEWAY_INTERVAL.)
-#ifndef SYSTEM_MODE
-//#define SYSTEM_MODE SYSTEM_MODE_RFID
-#define SYSTEM_MODE SYSTEM_MODE_GATEWAY_INTERVAL
+//  The "bicicletero" prefix is the one the gateway uses today
+//  (thesis-sketch/src/interfaces/cli/settings.py:39-40). Renaming it to a
+//  neutral prefix has to happen on both sides at once; override here with
+//  -DAPP_NODE_PREFIX / -DAPP_GATEWAY_PREFIX when the Fog side changes.
+#ifndef APP_NODE_PREFIX
+#define APP_NODE_PREFIX "bicicletero/esp"
+#endif
+#ifndef APP_GATEWAY_PREFIX
+#define APP_GATEWAY_PREFIX "bicicletero/gateway"
 #endif
 
-#if SYSTEM_MODE == SYSTEM_MODE_GATEWAY_INTERVAL && !MESSAGE_GATEWAY
-#error "SYSTEM_MODE_GATEWAY_INTERVAL requires MESSAGE_GATEWAY=1 (same ingest path as tags)."
+static constexpr const char kNodePrefix[]    = APP_NODE_PREFIX;
+static constexpr const char kGatewayPrefix[] = APP_GATEWAY_PREFIX;
+
+// ── MQTT broker ──────────────────────────────────────────────────────────────
+// LAN address of the Raspberry Pi / PC running Mosquitto — never "localhost",
+// the ESP32 has to reach it over the network. Override with -DAPP_MQTT_HOST.
+#ifndef APP_MQTT_HOST
+#define APP_MQTT_HOST "192.168.49.28"
 #endif
+#ifndef APP_MQTT_PORT
+#define APP_MQTT_PORT 1883
+#endif
+
+static constexpr const char kMqttHost[]     = APP_MQTT_HOST;
+static constexpr uint16_t   kMqttPort       = APP_MQTT_PORT;
+static constexpr const char kMqttClientId[] = "esp32-r200";
+static constexpr bool       kMqttRetain     = false;
+// Broker credentials: empty means anonymous (what the gateway ships today).
+static constexpr const char kMqttUser[]     = "";
+static constexpr const char kMqttPass[]     = "";
+
+// ── Provisioning ─────────────────────────────────────────────────────────────
+// Number of registration attempts before giving up until the next reconnect,
+// and how long to wait for <gateway prefix>/register/response/<MAC>.
+static constexpr uint8_t  kRegisterMaxAttempts = 5;
+static constexpr uint32_t kRegisterTimeoutMs   = 4000;
+// NVS namespace holding the credentials handed out by the gateway.
+static constexpr const char kNvsNamespace[] = "node";
+
+// Re-register once per boot even when NVS already holds credentials. The
+// gateway's register_node is idempotent by MAC, so this is safe and it is what
+// lets a node recover on its own after the gateway loses its nodes table. The
+// node keeps operating with the stored credentials if nobody answers.
+// Set to false to keep the node quiet at boot: its node_key is then not
+// republished on a topic Node-RED is subscribed to (gateway finding G10).
+static constexpr bool kRevalidateIdentityOnBoot = true;
+
+// ── Access decision output ───────────────────────────────────────────────────
+// The node has no physical output by default. Set a GPIO here (or with
+// -DACCESS_GRANTED_PIN=<gpio>) to drive an LED / relay when the gateway
+// answers 200 or 204.
+#ifndef ACCESS_GRANTED_PIN
+#define ACCESS_GRANTED_PIN -1
+#endif
+#ifndef ACCESS_DENIED_PIN
+#define ACCESS_DENIED_PIN -1
+#endif
+// Optional third output for "the system could not decide" (400/401/403/500/503,
+// or an unexpected status). Left at -1 the degradation is blinked on the denied
+// pin instead, so a 503 never looks like a refused tag.
+#ifndef ACCESS_DEGRADED_PIN
+#define ACCESS_DEGRADED_PIN -1
+#endif
+static constexpr int      kAccessGrantedPin  = ACCESS_GRANTED_PIN;
+static constexpr int      kAccessDeniedPin   = ACCESS_DENIED_PIN;
+static constexpr int      kAccessDegradedPin = ACCESS_DEGRADED_PIN;
+static constexpr uint32_t kAccessPulseMs     = 2000;
+
+// A tag read waits this long for the gateway's answer before it is reported as
+// unanswered. Also bounds the end-to-end latency measurement.
+static constexpr uint32_t kResponseTimeoutMs = 8000;
+
+// How many times a read that got no answer goes back on the outbox before it is
+// abandoned. The broker being up while the gateway container is down is the
+// likeliest outage on a single-Pi deployment, and a QoS 0 publish into nothing
+// looks like success from here.
+//   0 = drop on timeout (the v0.2 policy, and the option with no duplicates)
+//   n = up to n extra attempts, at the cost of a duplicate event upstream when
+//       the answer was only slow — the gateway retries its POST to AWS without
+//       an idempotency key (finding G3), so duplicates do reach DynamoDB.
+// Both policies are measurable on the A/B bench; neither is hard-coded.
+static constexpr uint8_t kUnansweredReadRetries = 2;
+
+// ── NTP ──────────────────────────────────────────────────────────────────────
+// Without wall-clock time the node can only send millis(), which is useless
+// for traceability. Timestamps are omitted until NTP has synchronised.
+#ifndef APP_NTP_SERVER
+#define APP_NTP_SERVER "pool.ntp.org"
+#endif
+static constexpr const char kNtpServer[] = APP_NTP_SERVER;

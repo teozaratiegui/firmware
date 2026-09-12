@@ -3,5 +3,12 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Credentials — never commit
 src/secrets.h
 **/secrets.h
+
+# Generated at build time by scripts/mqtt_node_env.py
+src/config/mqtt_node_config.h
+
+.DS_Store

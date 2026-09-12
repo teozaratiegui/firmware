@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
-# Writes src/config/mqtt_node_config.h from NODE_ID (build-time env). Default "001".
-# PowerShell: $env:NODE_ID = "rack-7a"; pio run
+# Writes src/config/mqtt_node_config.h from the NODE_ID environment variable.
+#
+# This id is only the FALLBACK label, used by the direct-to-Lambda transport
+# (GATEWAY_USE_MQTT=0), which has no registration handshake. Over MQTT the Fog
+# gateway assigns the real node id and the firmware stores it in NVS.
+#
+#   NODE_ID=bench-7a pio run          (PowerShell: $env:NODE_ID = "bench-7a")
 Import("env")  # type: ignore[name-defined]  # noqa: F821
 
 import os

@@ -1,92 +1,167 @@
+// =============================================================================
+//  Edge node — ESP32 + R200 UHF RFID reader.
+//
+//  Composition root and superloop. Every collaborator is built here and handed
+//  its dependencies; none of them reaches for a global. The loop does four
+//  things in order: keep the network up, keep the uplink and the registration
+//  handshake moving, drive the reader, and report.
+//
+//  Flow of one tag read:
+//      R200 -> TagProcessor (garbage filter + per-UID cooldown)
+//           -> MessageGateway -> <node prefix>/<node_id>/requests
+//           -> Fog gateway -> Cloud
+//           -> <node prefix>/<node_id>/responses -> AccessIndicator
+// =============================================================================
 #include <Arduino.h>
+
 #include <memory>
 
 #include "Cache.h"
 #include "MessageGateway.h"
 #include "R200.h"
 
+#include "app/access_indicator.h"
+#include "app/telemetry_reporter.h"
 #include "config/app_config.h"
 #include "gateway/transport_factory.h"
 #include "net/connectivity.h"
-#include "rfid/heartbeat.h"
+#include "provisioning/node_registrar.h"
 #include "rfid/rfid_hw.h"
 #include "rfid/tag_processing.h"
+#include "secrets.h"
 
-// ── Application state ───────────────────────────────────────────────────
-R200 rfid;
-Cache<kTagCacheCapacity> gate(kTagCooldownMs);
-TagProcessorState        tagState;
+namespace {
 
-static uint32_t timeMsProvider() {
+#if SYSTEM_MODE == SYSTEM_MODE_RFID
+constexpr const char kModeLabel[] = "rfid";
+#else
+constexpr const char kModeLabel[] = "interval";
+#endif
+
+uint32_t millisProvider() {
   return millis();
 }
 
-static MessageGatewayConfig gwCfg(&timeMsProvider, MQTT_NODE_ID);
-static MessageGateway       msgGw(createDefaultTransport(), gwCfg);
+MessageGateway::Config makeGatewayConfig() {
+  MessageGateway::Config config;
+  config.nodePrefix        = kNodePrefix;
+  config.gatewayPrefix     = kGatewayPrefix;
+  config.mac               = net::macAddress();
+  config.firmware          = FIRMWARE_VERSION;
+  config.responseTimeoutMs = kResponseTimeoutMs;
+  config.outboxCapacity    = kOutboxCapacity;
+  config.unansweredReadRetries = kUnansweredReadRetries;
+  config.millisFn          = &millisProvider;
+  config.isoTimeFn         = &net::isoTimestamp;
+  return config;
+}
 
-static unsigned long lastPollTick     = 0;
-static unsigned long lastLoopTick     = 0;
-static unsigned long lastHeartbeatMs  = 0;
+// Everything the node owns, built once Wi-Fi (and therefore the MAC) is up.
+struct Application {
+  R200                        reader;
+  MessageGateway              gateway;
+  provisioning::NodeRegistrar registrar;
+  app::AccessIndicator        indicator;
+  app::TelemetryReporter      telemetry;
+  rfid::TagProcessor          processor;
+
+  Application()
+      : gateway(createConfiguredTransport(), makeGatewayConfig()),
+        registrar(gateway, NODE_API_KEY, kRegisterMaxAttempts, kRegisterTimeoutMs,
+                  kRevalidateIdentityOnBoot),
+        indicator(kAccessGrantedPin, kAccessDeniedPin, kAccessDegradedPin, kAccessPulseMs),
+        telemetry(gateway, registrar, kTelemetryIntervalMs, kModeLabel, FIRMWARE_VERSION),
+        processor(reader, gateway) {}
+};
+
+std::unique_ptr<Application> node;
+
+#if SYSTEM_MODE == SYSTEM_MODE_RFID
+uint32_t lastPollMs = 0;
+uint32_t lastScanMs = 0;
+#endif
+
+void wireResponseHandling() {
+  node->gateway.setResponseHandler([](const GatewayResponse& response, uint32_t latencyMs) {
+    node->indicator.apply(response, latencyMs);
+    // 403 means the gateway does not know these credentials any more (its node
+    // table was wiped, or the node was revoked). Anything else is a business
+    // outcome and must not throw the identity away.
+    if (response.status == 403) {
+      Serial.println("[APP] credentials rejected — clearing identity and re-registering.");
+      node->registrar.reset();
+    }
+  });
+}
+
+}  // namespace
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\nBooting ESP32-WROOM-32 + R200");
+  delay(100);
+  Serial.printf("\n=== Edge node %s — mode=%s transport=%s ===\n", FIRMWARE_VERSION, kModeLabel,
+                GATEWAY_USE_MQTT ? "MQTT (Fog gateway)" : "HTTPS (direct to Lambda)");
 
-  connectivitySetup();
+  net::begin();
+
+  node = std::unique_ptr<Application>(new Application());
+  wireResponseHandling();
+  node->indicator.begin();
 
 #if SYSTEM_MODE == SYSTEM_MODE_RFID
-  setupR200Module(rfid);
-#elif SYSTEM_MODE == SYSTEM_MODE_GATEWAY_INTERVAL
-  Serial.println("SYSTEM_MODE_GATEWAY_INTERVAL — lector R200 no inicializado (solo telemetría por gateway).");
+  rfid::setupReader(node->reader);
 #else
-#error "SYSTEM_MODE must be SYSTEM_MODE_RFID or SYSTEM_MODE_GATEWAY_INTERVAL"
+  Serial.println("[APP] interval mode — R200 not initialised, telemetry only.");
 #endif
 
 #if MESSAGE_GATEWAY
+  // Identity first, transport second. The last will travels inside the CONNECT
+  // packet and cannot be corrected afterwards, so a node holding credentials in
+  // NVS has to restore them before the broker connection is opened — otherwise
+  // its testament says node_id:"" even though it knew its name all along.
 #if GATEWAY_USE_MQTT
-  Serial.println("[GW] Transport: MQTT — publishes to …/<NODE_ID>/requests (see app_config kMqttHost).");
+  // Restores NVS credentials if there are any; otherwise arms the handshake,
+  // which the superloop drives once the link is up.
+  node->registrar.begin();
 #else
-  Serial.println("[GW] Transport: HTTPS Lambda.");
+  // The direct-to-Lambda path has no registration handshake: it authenticates
+  // with the Cloud API key and labels itself with the build-time node id.
+  node->gateway.setIdentity(MQTT_NODE_ID, "");
 #endif
-  msgGw.begin();
+  node->gateway.begin();
+#else
+  Serial.println("[APP] MESSAGE_GATEWAY=0 — uplink disabled, serial output only.");
 #endif
 
-#if SYSTEM_MODE == SYSTEM_MODE_RFID
-  Serial.println("Listo. TAG_LOG = tag aceptado por caché (nuevo o tras cooldown).");
-#else
-  Serial.println("Listo. Telemetría por MESSAGE_GATEWAY cada intervalo de heartbeat (sin RFID).");
-#endif
+  Serial.println("[APP] ready.");
 }
 
 void loop() {
-  connectivityLoop();
+  net::loop();
+  if (!node) return;
 
 #if MESSAGE_GATEWAY
-  msgGw.loop();
+  node->gateway.loop();
+#if GATEWAY_USE_MQTT
+  node->registrar.loop();
 #endif
-
-  const unsigned long now = millis();
-
-  if (now - lastHeartbeatMs >= kHeartbeatIntervalMs) {
-    lastHeartbeatMs = now;
-#if MESSAGE_GATEWAY
-    logHeartbeat(rfid, now, &msgGw);
-#else
-    logHeartbeat(rfid, now, nullptr);
 #endif
-  }
+  node->indicator.loop();
 
 #if SYSTEM_MODE == SYSTEM_MODE_RFID
-  rfid.loop();
+  const uint32_t now = millis();
+  node->reader.loop();
 
-  if ((now - lastPollTick >= kPollIntervalMs) && !rfid.dataAvailable()) {
-    rfid.poll();
-    lastPollTick = now;
+  if (now - lastPollMs >= kPollIntervalMs && !node->reader.dataAvailable()) {
+    lastPollMs = now;
+    node->reader.poll();
   }
 
-  if (now - lastLoopTick < kMainLoopIntervalMs) return;
-  lastLoopTick = now;
-
-  tagProcessorLoop(rfid, gate, msgGw, tagState, now);
+  if (now - lastScanMs >= kMainLoopIntervalMs) {
+    lastScanMs = now;
+    node->processor.loop(now);
+  }
 #endif
+
+  node->telemetry.loop(node->processor.tagPresent());
 }

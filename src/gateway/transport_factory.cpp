@@ -1,26 +1,26 @@
 #include "gateway/transport_factory.h"
 
 #include "config/app_config.h"
+#include "net/connectivity.h"
 #include "secrets.h"
 
-#include <memory>
+#include "HttpTransport.h"
+#include "MqttTransport.h"
 
-#include "MessageGateway.h"
-
-std::unique_ptr<TransportMode> createDefaultTransport() {
+std::unique_ptr<TransportMode> createConfiguredTransport() {
 #if GATEWAY_USE_MQTT
-  Mqtt::Config mc;
-  mc.topicPrefix = kMqttTopicPrefix;
-  mc.nodeId      = MQTT_NODE_ID;
-  mc.host        = kMqttHost;
-  mc.port        = kMqttPort;
-  mc.clientId    = kMqttClientId;
-  mc.retain      = kMqttRetain;
-  mc.user        = kMqttUser;
-  mc.pass        = kMqttPass;
-  return std::unique_ptr<TransportMode>(new Mqtt(mc));
+  MqttTransport::Config config;
+  config.host = kMqttHost;
+  config.port = kMqttPort;
+  // Stable per-device client id: with clean_session=false the broker keys the
+  // session on this string, so it must survive reboots.
+  config.clientId = String(kMqttClientId) + "-" + net::macCompact();
+  config.user     = kMqttUser;
+  config.pass     = kMqttPass;
+  config.retain   = kMqttRetain;
+  return std::unique_ptr<TransportMode>(new MqttTransport(config));
 #else
   return std::unique_ptr<TransportMode>(
-      new Http(String(GATEWAY_LAMBDA_URL), String(GATEWAY_X_API_KEY)));
+      new HttpTransport(String(GATEWAY_LAMBDA_URL), String(GATEWAY_X_API_KEY)));
 #endif
 }

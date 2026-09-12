@@ -1,36 +1,42 @@
 #include "rfid/tag_processing.h"
 
-#include "config/app_config.h"
-#include "MessageGateway.h"
 #include "R200.h"
 #include "rfid/uid_utils.h"
 
-void tagProcessorLoop(R200& rfid, Cache<kTagCacheCapacity>& gate, MessageGateway& msgGw,
-                      TagProcessorState& st, uint32_t now) {
-  const bool tagPresent = !isZeroUid(rfid.uid);
+namespace rfid {
 
-  if (tagPresent) {
-    if (isLikelyFramingGarbageUid(rfid.uid)) {
-      if (now - st.lastGarbageLog >= kGarbageLogIntervalMs) {
-        st.lastGarbageLog = now;
-        Serial.println(
-            "RFID_SKIP: UID empieza con DD+AA (basura de trama UART), no se loguea ni POSTea.");
-      }
-    } else if (gate.shouldAccept(rfid.uid, now)) {
-      const String uidStr = toUidString(rfid.uid);
-      Serial.print("TAG_LOG ");
-      Serial.println(msgGw.makeTagPayload(uidStr));
+TagProcessor::TagProcessor(R200& reader, MessageGateway& gateway)
+    : reader_(reader), gateway_(gateway), cache_(kTagCooldownMs) {}
 
-#if MESSAGE_GATEWAY
-      Serial.println(msgGw.sendTag(uidStr) ? "[GW] sent" : "[GW] send FAILED");
-#endif
-    } else {
-      if (now - st.lastCacheSkipLog >= kCacheSkipLogIntervalMs) {
-        st.lastCacheSkipLog = now;
-        Serial.print("RFID_CACHE_SKIP uid=");
-        Serial.print(toUidString(rfid.uid));
-        Serial.println(" (esperá cooldown o probá otro tag)");
-      }
+void TagProcessor::loop(uint32_t nowMs) {
+  tagPresent_ = !isZeroUid(reader_.uid);
+  if (!tagPresent_) return;
+
+  if (!cache_.shouldAccept(reader_.uid, nowMs)) {
+    if (nowMs - lastSkipLogMs_ >= kCacheSkipLogIntervalMs) {
+      lastSkipLogMs_ = nowMs;
+      Serial.print("[RFID] within cooldown, not relayed: ");
+      Serial.println(toUidString(reader_.uid));
     }
+    return;
   }
+
+  const String uid = toUidString(reader_.uid);
+  accepted_++;
+
+  // Log what actually went out, not a second build of it: the payload carries a
+  // timestamp, and building it twice could print a `ts` that never left.
+  String published;
+  if (gateway_.sendTagRead(uid, &published)) {
+    Serial.print("[RFID] tag relayed ");
+    Serial.println(published);
+    return;
+  }
+  // Not necessarily an outage: a read also queues while an earlier one is still
+  // waiting for the gateway's answer, because only one can be in flight at a
+  // time. Either way the read is kept, not lost.
+  Serial.print("[RFID] tag accepted, not sent yet — queued: ");
+  Serial.println(uid);
 }
+
+}  // namespace rfid

@@ -28,7 +28,8 @@ inline String toUidString(const uint8_t* uid) {
   return s;
 }
 
-// R200 frames use 0xAA … 0xDD; mis-synced UART sometimes decodes that edge as "EPC".
-inline bool isLikelyFramingGarbageUid(const uint8_t* uid) {
-  return uid[0] == 0xDD && uid[1] == 0xAA;
-}
+// There used to be a "UID starts with DD AA" filter here, guessing at frame
+// markers that a mis-synced UART had decoded as an EPC. The driver now
+// resynchronises on the header, reads exactly the declared length and verifies
+// the checksum, so garbage cannot reach a UID any more — and the heuristic had
+// become a blind spot for real tags whose EPC happens to start with DD AA.

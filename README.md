@@ -1,6 +1,12 @@
 # ESP32 + R200 UHF RFID firmware
 
-Firmware for an **Espressif ESP32** dev board and a **UART-controlled R200** UHF reader. It reads passive tag IDs over RFID and can send them to a backend over **HTTPS** or **MQTT** (see `src/config/app_config.h` and `documents/ARCHITECTURE.md`).
+Firmware for an **Espressif ESP32** dev board and a **UART-controlled R200** UHF reader. It
+reads passive UHF tags and relays them either to a **Fog gateway over MQTT** (the
+production path, where the node registers itself and receives an access decision back) or
+**straight to an AWS Lambda over HTTPS** (the bench path that bypasses the Fog layer).
+
+This is the Edge layer of an Edge / Fog / Cloud asset-traceability system; see
+`documents/ARCHITECTURE.md` for how the pieces fit.
 
 This README is written so you can **download the repo**, use a **breadboard**, **three jumper wires** for the data link (plus power as described below), an **ESP32**, and an **R200**, and get a first run on the serial monitor.
 
@@ -60,17 +66,22 @@ If you do not use Git, download the project as a ZIP and open the **`Firmware`**
 
 ## Configure secrets
 
-1. Copy the example secrets file:
-   - Copy `src/secrets_example.h` to **`src/secrets.h`** (same folder).
+1. Copy `src/secrets_example.h` to **`src/secrets.h`** (same folder). It is gitignored.
 
-2. Edit **`src/secrets.h`** and set:
-   - **`WIFI_SSID`** / **`WIFI_PASS`** — network the ESP32 will join.
-   - **`GATEWAY_LAMBDA_URL`** — HTTPS endpoint for tag ingest (JSON body `{"tag":"<hex>"}`), if you use HTTP mode.
-   - **`GATEWAY_X_API_KEY`** — API key header expected by your gateway, if applicable.
+2. Fill in:
 
-3. **Do not commit** real `secrets.h` to a public repository. Keep `secrets_example.h` as the template only.
+   | Define | Needed when | What it is |
+   | --- | --- | --- |
+   | `WIFI_SSID` / `WIFI_PASS` | always | The network the ESP32 joins |
+   | `NODE_API_KEY` | MQTT mode | Shared key the Fog gateway checks before it issues node credentials. Must match `NODE_API_KEY` in the gateway's `.env` |
+   | `GATEWAY_LAMBDA_URL` | HTTPS mode | Lambda Function URL. HTTPS only — `http://` gets a TLS mismatch from AWS |
+   | `GATEWAY_X_API_KEY` | HTTPS mode | The Cloud API key, from `terraform output -raw api_key_value` on the tenant root |
 
----
+3. Never commit the real `secrets.h`. `secrets_example.h` is the template.
+
+The node's **identity is not configured here**. Over MQTT it registers itself with the
+gateway using its MAC address and stores the `node_id` / `node_key` the gateway hands back
+in NVS, so it survives reboots and reflashes of the same board.
 
 ## Serial port (upload and monitor)
 
@@ -99,10 +110,24 @@ Or use your IDE’s **PlatformIO: Upload** and **Serial Monitor** actions.
 
 **Expected on boot (summary):**
 
-- Wi‑Fi connection status and IP (when connected).
-- **R200 link test** line (if `R200_LINK_TEST` is enabled): confirms UART to the module.
-- Periodic **HEARTBEAT** lines (uptime, Wi‑Fi, heap, tag present).
-- When a tag is accepted (after cache rules): **`TAG_LOG`** and optional **`[GW] sent`** if the gateway send succeeds.
+```
+=== Edge node 0.2.0 — mode=rfid transport=MQTT (Fog gateway) ===
+[NET] connecting to Wi-Fi....
+[NET] Wi-Fi up  ip=192.168.49.51  rssi=-54 dBm  mac=A0:B7:65:12:34:56
+[RFID] UART link test: PASS — the ESP32 is talking to the R200.
+[PROV] no stored identity — will register as mac=A0:B7:65:12:34:56
+[GW/MQTT] connected as esp32-r200-A0B765123456 (clean_session=false)
+[PROV] register attempt 1/5 mac=A0:B7:65:12:34:56
+[PROV] registered as node_id=node-3f9a1c04
+[GW/MQTT] subscribed bicicletero/esp/node-3f9a1c04/responses
+[APP] ready.
+[TELEMETRY] up=30s wifi=up ip=192.168.49.51 rssi=-54 heap=213480 node=node-3f9a1c04 ...
+[RFID] tag accepted {"tag":"E28006900000500E88C6A4A7","node_key":"…","ts":"2026-09-12T14:03:07Z"}
+[ACCESS] status=200 (access allowed) rtt=184 ms message=Access allowed
+```
+
+On a second boot the `[PROV]` lines are replaced by
+`[PROV] identity restored from NVS: node_id=node-3f9a1c04`.
 
 If UART fails: recheck **TX/RX crossover**, **GND**, **baud**, and **R200 power**.
 
@@ -110,28 +135,61 @@ If UART fails: recheck **TX/RX crossover**, **GND**, **baud**, and **R200 power*
 
 ## Feature toggles (quick reference)
 
-In **`src/config/app_config.h`** (or via `build_flags` in `platformio.ini`):
+All of these are **compile-time**: changing one means rebuilding and reflashing. Set them
+in `src/config/app_config.h` or with `build_flags` in `platformio.ini`.
 
-| Flag                  | Meaning                                                                                                    |
-| --------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `MESSAGE_GATEWAY`     | `1` = call cloud send path when a tag is accepted.                                                         |
-| `GATEWAY_USE_MQTT`    | `0` = HTTPS (`GATEWAY_*` in `secrets.h`); `1` = MQTT: broker `kMqtt*` in `app_config.h`, topics `bicicletero/esp/<NODE_ID>/requests` (publish) and `…/responses` (subscribe). |
-| `R200_LINK_TEST`      | `1` = run UART sanity check at boot.                                                                       |
-| `USE_CONTINUOUS_POLL` | `0` = timed poll; `1` = streaming-style mode if your use case needs it.                                    |
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `SYSTEM_MODE` | `SYSTEM_MODE_RFID` (0) | `0` reads tags; `1` skips the reader entirely and only reports telemetry |
+| `GATEWAY_USE_MQTT` | `1` | `1` = MQTT to the Fog gateway. `0` = HTTPS straight to the Lambda, bypassing the Fog layer |
+| `MESSAGE_GATEWAY` | `1` | `0` disables the uplink altogether (serial-only bring-up) |
+| `R200_LINK_TEST` | `1` | UART sanity check at boot |
+| `USE_CONTINUOUS_POLL` | `0` | `1` uses multi-poll, which runs a finite counter and is never re-armed. `0` (single poll) is the supported mode |
+| `APP_MQTT_HOST` | `192.168.49.28` | Broker address. Must be reachable from the ESP32 — never `localhost` |
+| `APP_NODE_PREFIX` / `APP_GATEWAY_PREFIX` | `bicicletero/esp`, `bicicletero/gateway` | MQTT topic prefixes. Both sides of the contract have to agree, so change them together with the gateway's `APP_MQTT_TOPIC` |
+| `ACCESS_GRANTED_PIN` / `ACCESS_DENIED_PIN` | `-1` (off) | GPIO pulsed when the gateway allows or refuses a tag |
+| `ACCESS_DEGRADED_PIN` | `-1` (off) | GPIO pulsed when the gateway could not decide (`400`, `401`, `403`, `500`, `503`). Left off, the degradation is blinked on the denied pin instead, so a dead backend never looks like a refused tag |
+| `kUnansweredReadRetries` | `2` | How many times a read that got no answer goes back on the outbox. `0` restores the drop-on-timeout policy |
+| `kRevalidateIdentityOnBoot` | `true` | Re-register once per boot even with credentials in NVS, so a node recovers on its own if the gateway lost its node table |
 
-**`SYSTEM_MODE`** — in `src/config/app_config.h`, default is `SYSTEM_MODE_RFID` (R200 + tag gateway on new/cooldown reads). Use `SYSTEM_MODE_GATEWAY_INTERVAL` for no R200: **only** periodic telemetry on `MESSAGE_GATEWAY` (HTTP or MQTT per `GATEWAY_USE_MQTT`, interval = `kHeartbeatIntervalMs`). Override with `build_flags = '-DSYSTEM_MODE=1'`. Requires `MESSAGE_GATEWAY=1` for `SYSTEM_MODE_GATEWAY_INTERVAL`.
+Example:
 
-**MQTT `NODE_ID`** — build-time env var read by `scripts/mqtt_node_env.py` into `src/config/mqtt_node_config.h`. Example (PowerShell): `$env:NODE_ID = "rack-a1"; pio run`. Default `001` if unset. Same id is used as `esp32_id` in JSON payloads.
+```bash
+PLATFORMIO_BUILD_FLAGS='-DSYSTEM_MODE=1' pio run
+PLATFORMIO_BUILD_FLAGS='-DGATEWAY_USE_MQTT=0 -DAPP_MQTT_HOST=\"192.168.0.20\"' pio run
+```
+
+Two things bite here. Build flags go through `PLATFORMIO_BUILD_FLAGS`, **not** through
+`pio run -a` — `-a` is `--program-arg`, PlatformIO ignores it for build flags and hands you
+the default firmware with no warning at all. And a flag whose value is a string needs its
+quotes escaped (`\"…\"`), because PlatformIO strips one level when it splits the variable;
+without the backslashes the preprocessor sees a bare `192.168.0.20` and the build fails
+with *too many decimal points in number*.
+
+`NODE_ID` is an **environment variable**, not a build flag: `scripts/mqtt_node_env.py`
+writes it into `src/config/mqtt_node_config.h` before each build. It is only the fallback
+label used by the direct-to-Lambda mode — over MQTT the gateway assigns the real id.
 
 ---
+
+## Run the tests
+
+The logic that does not need a radio or a network runs on the host:
+
+```bash
+./test/native/run.sh
+```
+
+No PlatformIO needed, just a C++17 compiler. See [test/native/README.md](test/native/README.md).
 
 ## Documentation in this repo
 
 | Document                                               | Content                                               |
 | ------------------------------------------------------ | ----------------------------------------------------- |
-| [documents/ARCHITECTURE.md](documents/ARCHITECTURE.md) | Software modules and data flow.                       |
+| [documents/ARCHITECTURE.md](documents/ARCHITECTURE.md) | Modules, the path of one tag read, topics, run modes.  |
 | [documents/HARDWARE.md](documents/HARDWARE.md)         | ESP32 ↔ R200 electrical and protocol overview.        |
-| [documents/ROADMAP.md](documents/ROADMAP.md)           | Planned versions (tests, MQTT auth, subscribe, etc.). |
+| [documents/ROADMAP.md](documents/ROADMAP.md)           | What this version does and what comes next.           |
+| [test/native/README.md](test/native/README.md)         | Host test suite: what it covers and what it does not. |
 
 ---
 

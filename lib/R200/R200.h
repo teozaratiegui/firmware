@@ -1,129 +1,138 @@
 #ifndef R200_h
 #define R200_h
 
-// Generate additional debug information to the serial connection when defined
-// #define DEBUG
-
-#include <stdint.h>
 #include <Arduino.h>
+#include <stdint.h>
+
+// Uncomment for verbose frame-level logging on the serial console.
+// #define R200_DEBUG
 
 #define RX_BUFFER_LENGTH 256
 
+// -----------------------------------------------------------------------------
+//  Driver for the R200 UHF RFID reader over UART.
+//
+//  Frame layout, both directions:
+//      AA | Type | Command | ParamLen (MSB, LSB) | Param... | Checksum | DD
+//  Type is 0x00 command, 0x01 response, 0x02 notification. The checksum is the
+//  low byte of the sum from Type up to the last parameter (header excluded).
+//  Total frame length is therefore ParamLen + 7.
+// -----------------------------------------------------------------------------
 class R200 {
+ public:
+  R200();
 
-  private:
-    HardwareSerial *_serial;
-    uint8_t _buffer[RX_BUFFER_LENGTH] = {0};
-    uint8_t calculateCheckSum(uint8_t *buffer);
-    uint16_t arrayToUint16(uint8_t *array);
-    bool parseReceivedData();
-    bool dataIsValid();
-    bool receiveData(unsigned long timeOut = 1000);
-    void dumpReceiveBufferToSerial();
-    uint8_t flush();
+  /** Last EPC seen, all zeros when no tag is in the field. */
+  uint8_t uid[12] = {0};
 
-    const uint8_t blankUid[12] = {0};
+  bool begin(HardwareSerial* serial = &Serial2, int baud = 115200, uint8_t rxPin = 16,
+             uint8_t txPin = 17);
 
-  public:
-    R200();
+  /** Reads and dispatches whatever the reader has sent. Call every iteration. */
+  void loop();
 
-    uint8_t uid[12] = {0};
+  /** Sends one inventory command. */
+  void poll();
 
-    bool begin(HardwareSerial *serial = &Serial2, int baud = 115200, uint8_t RxPin = 16, uint8_t TxPin = 17);
-    void loop();
-    void poll();
-    void setMultiplePollingMode(bool enable=true);
-    /** Clears UART RX FIFO (e.g. after power-on noise or bad framing). */
-    void discardRxBuffer();
-    void dumpModuleInfo();
-    /** Sends GetModuleInfo; returns true if a valid R200 frame comes back (proves UART TX+RX). */
-    bool linkTest();
-    bool dataAvailable();
+  void setMultiplePollingMode(bool enable = true);
 
-    //bool newCardPresent();
-    //bool isCardPresent();
-    void dumpUIDToSerial();
+  /** Clears the UART RX FIFO (power-on noise, bad framing). */
+  void discardRxBuffer();
 
+  void dumpModuleInfo();
 
+  /** Sends GetModuleInfo and waits for a valid frame — proves UART TX and RX. */
+  bool linkTest();
 
- // Commands sent to the reader, and responses received back, are sent as data frames, e.g.
- // Header | Type | Command | ParamLength (2bytes) | Parameter(s) | Checksum | End
- //   AA   |  00  |   07    |      00 03           |   04 02 05   |    15    | DD
- //
- // Frames always start with the header value 0xAA
- // Type indicates a command to the reader (0x00), or a response (0x01), or notification (0x02) back from it
- // Command is the instruction to be performed, or the response from that instruction
- // ParamLength gives 2-byte (MSB then LSB) number of parameters being passed in the frame
- // Params may be zero or more
- // Checksum is the LSB of the sum of bytes from the type to the last instruction parameter (i.e. excluding Frame Header)
- // Frames always end with the tail value 0xDD
+  bool dataAvailable() const;
 
-  // Position of elements in the frame definition, as offset from the header
-  enum R200_FrameStructure : byte {
-    R200_HeaderPos = 0x00,
-    R200_TypePos = 0x01,
-    R200_CommandPos = 0x02,
+  void dumpUIDToSerial() const;
+
+  // Position of each element in a frame, as an offset from the header.
+  enum R200_FrameStructure : uint8_t {
+    R200_HeaderPos         = 0x00,
+    R200_TypePos           = 0x01,
+    R200_CommandPos        = 0x02,
     R200_ParamLengthMSBPos = 0x03,
     R200_ParamLengthLSBPos = 0x04,
-    R200_ParamPos = 0x05,
-    // Offset of other response elements - parameters, checksum, and frame end - are variable
-    // R200_ParamPos = if(R200_ParamLengthMSBPos << 8 + R200_ParamLengthLSBPos) > 0) { 0x05 } else { null }
-    // R200_ChecksumPos = 0x05 + (R200_ParamLengthMSBPos << 8 + R200_ParamLengthLSBPos)
-    // R200_EndPos = 0x06 + (R200_ParamLengthMSBPos << 8 + R200_ParamLengthLSBPos)
+    R200_ParamPos          = 0x05,
   };
 
-  enum R200_FrameControl : byte {
+  enum R200_FrameControl : uint8_t {
     R200_FrameHeader = 0xAA,
-    R200_FrameEnd = 0xDD,
+    R200_FrameEnd    = 0xDD,
   };
 
-  enum R200_FrameType : byte {
-    FrameType_Command = 0x00,
-    FrameType_Response = 0x01,
+  enum R200_FrameType : uint8_t {
+    FrameType_Command      = 0x00,
+    FrameType_Response     = 0x01,
     FrameType_Notification = 0x02,
   };
 
-  // 35.
-	enum R200_Command : byte {
-    CMD_GetModuleInfo = 0x03,
-    CMD_SinglePollInstruction = 0x22,
-    CMD_MultiplePollInstruction = 0x27,
-    CMD_StopMultiplePoll = 0x28,
-    CMD_SetSelectParameter = 0x0C,
-    CMD_GetSelectParameter = 0x0B,
-    CMD_SetSendSelectInstruction = 0x12,
-    CMD_ReadLabel = 0x39,
-    CMD_WriteLabel = 0x49,
-    CMD_LockLabel = 0x82,
-    CMD_KillTag = 0x65,
-    CMD_GetQueryParameters = 0x0D,
-    CMD_SetQueryParameters= 0x0E,
-    CMD_SetWorkArea = 0x07,
-    CMD_SetWorkingChannel = 0xAB,
-    CMD_GetWorkingChannel = 0xAA,
-    CMD_SetAutoFrequencyHopping = 0xAD,
-    CMD_AcquireTransmitPower = 0xB7,
-    CMD_SetTransmitPower = 0xB6,
-    CMD_SetTransmitContinuousCarrier = 0xB0,
+  enum R200_Command : uint8_t {
+    CMD_GetModuleInfo                    = 0x03,
+    CMD_SinglePollInstruction            = 0x22,
+    CMD_MultiplePollInstruction          = 0x27,
+    CMD_StopMultiplePoll                 = 0x28,
+    CMD_SetSelectParameter               = 0x0C,
+    CMD_GetSelectParameter               = 0x0B,
+    CMD_SetSendSelectInstruction         = 0x12,
+    CMD_ReadLabel                        = 0x39,
+    CMD_WriteLabel                       = 0x49,
+    CMD_LockLabel                        = 0x82,
+    CMD_KillTag                          = 0x65,
+    CMD_GetQueryParameters               = 0x0D,
+    CMD_SetQueryParameters               = 0x0E,
+    CMD_SetWorkArea                      = 0x07,
+    CMD_SetWorkingChannel                = 0xAB,
+    CMD_GetWorkingChannel                = 0xAA,
+    CMD_SetAutoFrequencyHopping          = 0xAD,
+    CMD_AcquireTransmitPower             = 0xB7,
+    CMD_SetTransmitPower                 = 0xB6,
+    CMD_SetTransmitContinuousCarrier     = 0xB0,
     CMD_GetReceiverDemodulatorParameters = 0xF1,
     CMD_SetReceiverDemodulatorParameters = 0xF0,
-    CMD_TestRFInputBlockingSignal = 0xF2,
-    CMD_TestChannelRSSI = 0xF3,
-    CMD_ControlIOPort = 0x1A,
-    CMD_ModuleSleep = 0x17,
-    CMD_SetModuleIdleSleepTime = 0x1D,
-    CMD_ExecutionFailure = 0xFF,
+    CMD_TestRFInputBlockingSignal        = 0xF2,
+    CMD_TestChannelRSSI                  = 0xF3,
+    CMD_ControlIOPort                    = 0x1A,
+    CMD_ModuleSleep                      = 0x17,
+    CMD_SetModuleIdleSleepTime           = 0x1D,
+    CMD_ExecutionFailure                 = 0xFF,
   };
 
-  enum R200_ErrorCode : byte {
-    ERR_CommandError = 0x17,
-    ERR_FHSSFail = 0x20,
-    ERR_InventoryFail = 0x15,
-    ERR_AccessFail = 0x16,
-    ERR_ReadFail = 0x09,
-    ERR_WriteFail = 0x10,
-    ERR_LockFail = 0x13,
-    ERR_KillFail = 0x12,
+  enum R200_ErrorCode : uint8_t {
+    ERR_CommandError   = 0x17,
+    ERR_FHSSFail       = 0x20,
+    ERR_InventoryFail  = 0x15,
+    ERR_AccessFail     = 0x16,
+    ERR_ReadFail       = 0x09,
+    ERR_WriteFail      = 0x10,
+    ERR_LockFail       = 0x13,
+    ERR_KillFail       = 0x12,
   };
+
+ private:
+  static constexpr uint8_t  kEpcLength      = 12;
+  // Inventory answer: AA 02 22 PL_H PL_L RSSI PC PC EPC(12) CRC CRC CHK DD.
+  // The EPC therefore starts at byte 8, after the 5-byte preamble, RSSI and PC.
+  // v0.1 read from byte 9 and shifted every EPC it ever reported by one byte.
+  static constexpr uint8_t  kEpcOffset      = 8;
+  static constexpr uint16_t kMinFrameLength = 7;   // header + 4 + checksum + end
+
+  /** Parameter count declared by the frame, clamped to what actually arrived. */
+  uint16_t declaredParamLength() const;
+  uint8_t  calculateCheckSum() const;
+  bool     frameIsValid() const;
+  bool     receiveData(unsigned long timeoutMs = 100);
+  bool     readExactly(uint16_t offset, uint16_t count, unsigned long startedAt,
+                       unsigned long timeoutMs);
+  void     handleFrame();
+  uint8_t  flush();
+
+  HardwareSerial* _serial       = nullptr;
+  uint8_t         _buffer[RX_BUFFER_LENGTH] = {0};
+  uint16_t        _frameLength  = 0;
+
+  static const uint8_t blankUid[kEpcLength];
 };
 #endif

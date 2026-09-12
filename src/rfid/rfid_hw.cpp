@@ -3,40 +3,39 @@
 #include "config/app_config.h"
 
 #include <Arduino.h>
-#include <SPI.h>
 
 #include "R200.h"
 
-void setupR200Module(R200& rfid) {
+namespace rfid {
+
+void setupReader(R200& reader) {
   Serial2.setRxBufferSize(2048);
-  rfid.begin(&Serial2, R200_BAUD, R200_RX_PIN, R200_TX_PIN);
-  rfid.discardRxBuffer();
-  rfid.setMultiplePollingMode(false);
+  reader.begin(&Serial2, R200_BAUD, R200_RX_PIN, R200_TX_PIN);
+  reader.discardRxBuffer();
+  reader.setMultiplePollingMode(false);
   delay(80);
-  rfid.discardRxBuffer();
+  reader.discardRxBuffer();
 
 #if R200_LINK_TEST
-  {
-    const bool r200UartOk = rfid.linkTest();
-    Serial.print("R200 link test (GetModuleInfo, CRC OK): ");
-    Serial.println(
-        r200UartOk ? "PASS — ESP TX/RX hablando con el R200." : "FAIL — revisá GPIO RX/TX cruzados, GND, baud, VCC.");
-  }
+  const bool linkOk = reader.linkTest();
+  Serial.printf("[RFID] UART link test: %s\n",
+                linkOk ? "PASS — the ESP32 is talking to the R200."
+                       : "FAIL — check crossed RX/TX, common GND, baud rate and R200 power.");
 #endif
 
 #if USE_CONTINUOUS_POLL
-  rfid.setMultiplePollingMode(true);
+  // Multi-poll runs a finite counter (0xFFFF) and is never re-armed: it stops
+  // on its own after ~65k inventories. Single poll is the supported mode.
+  reader.setMultiplePollingMode(true);
 #endif
 
-  Serial.print("R200 UART: RX=GPIO");
-  Serial.print(R200_RX_PIN);
-  Serial.print(" TX=GPIO");
-  Serial.print(R200_TX_PIN);
-  Serial.println(" (si no hay tags: cable ESP RX→TX del R200; o probá RX=16 TX=17 en app_config.h)");
-  Serial.println("RFID inicializado");
-  rfid.dumpModuleInfo();
-  for (uint8_t i = 0; i < 20; i++) {
+  Serial.printf("[RFID] R200 on Serial2 RX=GPIO%d TX=GPIO%d @ %d baud\n", R200_RX_PIN, R200_TX_PIN,
+                R200_BAUD);
+  reader.dumpModuleInfo();
+  for (uint8_t i = 0; i < 20; ++i) {
     delay(5);
-    rfid.loop();
+    reader.loop();
   }
 }
+
+}  // namespace rfid
