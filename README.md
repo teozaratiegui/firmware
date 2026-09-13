@@ -218,7 +218,7 @@ editing any source file.
 | --- | --- | --- |
 | `SYSTEM_MODE` | `SYSTEM_MODE_RFID` (0) | `0` reads tags; `1` skips the reader entirely and only reports telemetry |
 | `GATEWAY_USE_MQTT` | `1` | `1` = MQTT to the Fog gateway. `0` = HTTPS straight to the Lambda, bypassing the Fog layer |
-| `MESSAGE_GATEWAY` | `1` | `0` disables the uplink altogether (serial-only bring-up) |
+| `MESSAGE_GATEWAY` | `1` | `0` disables the uplink altogether (serial-only bring-up): the reader still runs and prints every UID, and reads are dropped rather than queued for a link that is never opened |
 | `R200_LINK_TEST` | `1` | UART sanity check at boot |
 | `USE_CONTINUOUS_POLL` | `0` | `1` uses multi-poll, which runs a finite counter and is never re-armed. `0` (single poll) is the supported mode |
 | `APP_MQTT_HOST` | `"192.168.49.28"` | Broker address. Must be reachable from the ESP32 — never `localhost` |
@@ -298,12 +298,12 @@ against the real ArduinoJson is built automatically if ArduinoJson is on disk (r
 `pio run` once, or set `ARDUINOJSON_DIR`). See
 [test/native/README.md](test/native/README.md) for what is covered and what is not.
 
-> **Check that both binaries ran.** The behaviour binary asserts against a hand-written
-> parser (`gateway_codec_stub.cpp`), so it stays green even if a field name in the real
-> `GatewayMessages.cpp` changes — only the codec binary catches that. The script currently
-> exits 0 when the codec binary is skipped for want of ArduinoJson, which makes "the
-> contract is fine" look exactly like "the contract was not checked". Tracked in
-> [documents/ROADMAP.md](documents/ROADMAP.md#known-defects-found-2026-09-13).
+> **Both binaries have to run.** The behaviour binary asserts against a hand-written parser
+> (`gateway_codec_stub.cpp`), so it stays green even if a field name in the real
+> `GatewayMessages.cpp` changes — only the codec binary catches that. So a missing
+> ArduinoJson is a **failure**, not a skip: "the contract is fine" must not look like "the
+> contract was not checked". `ALLOW_SKIP_CODEC=1` runs the behaviour suite alone on purpose,
+> and says out loud that the contract went unverified.
 
 ---
 

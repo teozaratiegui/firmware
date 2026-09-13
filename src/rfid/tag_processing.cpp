@@ -34,8 +34,12 @@ void TagProcessor::loop(uint32_t nowMs) {
   }
   // Not necessarily an outage: a read also queues while an earlier one is still
   // waiting for the gateway's answer, because only one can be in flight at a
-  // time. Either way the read is kept, not lost.
-  Serial.print("[RFID] tag accepted, not sent yet — queued: ");
+  // time. Either way the read is kept, not lost — unless there is no outbox to
+  // keep it in, which is what serial-only bring-up configures. Saying "queued"
+  // there would be a lie, and the read was still worth printing: seeing the UID
+  // is the whole point of that mode.
+  Serial.print(gateway_.storeAndForwardEnabled() ? "[RFID] tag accepted, not sent yet — queued: "
+                                                 : "[RFID] tag read, uplink disabled: ");
   Serial.println(uid);
 }
 

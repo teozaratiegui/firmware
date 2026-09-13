@@ -49,7 +49,12 @@ MessageGateway::Config makeGatewayConfig() {
   config.mac               = net::macAddress();
   config.firmware          = FIRMWARE_VERSION;
   config.responseTimeoutMs = kResponseTimeoutMs;
-  config.outboxCapacity    = kOutboxCapacity;
+  // MESSAGE_GATEWAY=0 is serial-only bring-up, and app_config.h promises it
+  // "disables the uplink entirely". Storing reads for an uplink that is never
+  // opened is not disabling it: the outbox filled on the 17th tag and the
+  // console started printing "[GW] outbox full — oldest tag read dropped", an
+  // error that is not an error, in the one mode used to diagnose the hardware.
+  config.outboxCapacity    = MESSAGE_GATEWAY ? kOutboxCapacity : 0;
   config.unansweredReadRetries = kUnansweredReadRetries;
   config.millisFn          = &millisProvider;
   config.isoTimeFn         = &net::isoTimestamp;

@@ -30,6 +30,19 @@ class TransportMode {
   /** Sends one message on the node's own uplink channel. */
   virtual bool sendUplink(const String& payload) = 0;
 
+  /**
+   * Status of the answer the last sendUplink() carried back, or 0 when this
+   * transport has no synchronous answer.
+   *
+   * MQTT has none: the gateway replies later, on the responses topic. HTTP does
+   * — the POST returns the Cloud's status — and reporting it here is what lets
+   * MessageGateway feed both arms of the A/B bench through the same path, so the
+   * direct arm also gets an access decision and a measured round trip. It used
+   * to be an HttpTransport-only accessor that nothing could reach, because the
+   * gateway holds a TransportMode.
+   */
+  virtual int uplinkStatus() const { return 0; }
+
   virtual bool publish(const String& topic, const String& payload, bool retain = false) {
     (void)topic;
     (void)payload;

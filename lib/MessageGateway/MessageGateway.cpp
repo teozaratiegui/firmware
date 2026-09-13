@@ -194,7 +194,14 @@ void MessageGateway::handleResponse(const String& payload) {
     Serial.println(payload);
     return;
   }
+  completeRead(response);
+}
 
+// Where an answer lands whatever carried it: the gateway's JSON off the
+// responses topic, or the status the direct POST brought back. Keeping the two
+// arms on one path is what makes them comparable — the same round trip, the same
+// counter, the same access decision.
+void MessageGateway::completeRead(const GatewayResponse& response) {
   uint32_t latencyMs = 0;
   if (inFlight_) {
     latencyMs  = now() - inFlightSinceMs_;
@@ -241,25 +248,44 @@ bool MessageGateway::transmit(const String& tag, uint8_t attempts, String* paylo
   if (!transport_) return false;
 
   const String payload = buildTagPayload(tag);
+
+  // One read in flight at a time, and callers must not overwrite the slot: the
+  // gateway's answer carries no tag (core/contracts/gateway.py:43-59), so the
+  // only thing that pairs a response with a read is this slot. Sending a second
+  // read before the first is answered used to mis-pair them — the round trip of
+  // read N was reported for response 1, and the reads it displaced were never
+  // retried and never counted as lost. Both callers (sendTagRead and
+  // flushOutbox) now wait through readyToTransmit().
+  //
+  // Armed *before* the send, not after, because over HTTP the answer arrives
+  // inside sendUplink(): the POST is synchronous. Arming it afterwards left the
+  // direct arm with nothing to pair its answer against and no round trip to
+  // measure.
+  inFlightTag_      = tag;
+  inFlightAttempts_ = static_cast<uint8_t>(attempts + 1);
+  inFlightSinceMs_  = now();
+  inFlight_         = true;
+
   if (!transport_->sendUplink(payload)) {
+    // Nothing is coming back for a send that never left, so the slot is released
+    // here instead of waiting out responseTimeoutMs: the caller requeues the
+    // read itself.
+    inFlight_ = false;
     stats_.uplinkFailures++;
     return false;
   }
 
   stats_.tagReadsSent++;
   if (payloadOut) *payloadOut = payload;
-  if (isMqtt()) {
-    // One read in flight at a time, and callers must not overwrite the slot: the
-    // gateway's answer carries no tag (core/contracts/gateway.py:43-59), so the
-    // only thing that pairs a response with a read is this slot. Sending a
-    // second read before the first is answered used to mis-pair them — the
-    // round trip of read N was reported for response 1, and the reads it
-    // displaced were never retried and never counted as lost. Both callers
-    // (sendTagRead and flushOutbox) now wait through readyToTransmit().
-    inFlightTag_      = tag;
-    inFlightAttempts_ = static_cast<uint8_t>(attempts + 1);
-    inFlightSinceMs_  = now();
-    inFlight_         = true;
+
+  // A transport that answers synchronously (HTTP) reports the status here; MQTT
+  // returns 0 and its answer arrives later on the responses topic.
+  const int status = transport_->uplinkStatus();
+  if (status > 0) {
+    GatewayResponse answer;
+    answer.status = status;
+    answer.valid  = true;
+    completeRead(answer);
   }
   return true;
 }

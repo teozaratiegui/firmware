@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "HttpTransport.h"
 #include "MessageGateway.h"
 #include "fake_transport.h"
 
@@ -30,7 +31,8 @@ struct Rig {
   FakeTransport*                  transport;
   std::unique_ptr<MessageGateway> gateway;
 
-  explicit Rig(uint8_t outboxCapacity = 4, uint8_t unansweredRetries = 2) {
+  explicit Rig(uint8_t outboxCapacity = 4, uint8_t unansweredRetries = 2,
+               TransportKind kind = TransportKind::Mqtt) {
     g_millis = 1000;
 
     MessageGateway::Config cfg;
@@ -44,7 +46,7 @@ struct Rig {
     cfg.unansweredReadRetries = unansweredRetries;
     cfg.isoTimeFn             = &countingIso;
 
-    std::unique_ptr<FakeTransport> owned(new FakeTransport());
+    std::unique_ptr<FakeTransport> owned(new FakeTransport(kind));
     transport = owned.get();
     gateway.reset(new MessageGateway(std::move(owned), cfg));
   }
@@ -458,6 +460,115 @@ void testGateway() {
     CHECK(!rig.gateway->hasGatewayCredentials());
     rig.gateway->setIdentity("node-1", "key");
     CHECK(rig.gateway->hasGatewayCredentials());
+  }
+
+  // ── The direct-to-Lambda arm ───────────────────────────────────────────────
+  //
+  // The A/B bench the thesis leans on has two arms and only one of them used to
+  // be instrumented: over HTTP nothing ever reached handleResponse, so the node
+  // had no access decision and no measured round trip, and a business answer was
+  // read as a failed send.
+
+  SECTION("HttpTransport: a business answer is a delivery, a dead socket is not");
+  {
+    // The whole point of the split. Everything the Cloud can answer with counts
+    // as delivered, including the statuses that mean "no".
+    CHECK(HttpTransport::isDelivered(200));
+    CHECK(HttpTransport::isDelivered(201));
+    CHECK(HttpTransport::isDelivered(204));
+    CHECK(HttpTransport::isDelivered(400));
+    CHECK(HttpTransport::isDelivered(401));
+    CHECK(HttpTransport::isDelivered(404));  // unknown tag
+    CHECK(HttpTransport::isDelivered(422));  // denied tag — used to retry forever
+    CHECK(HttpTransport::isDelivered(500));
+    CHECK(HttpTransport::isDelivered(503));
+
+    // HTTPClient's own error codes are negative, and 0 is "no status at all".
+    CHECK(!HttpTransport::isDelivered(0));
+    CHECK(!HttpTransport::isDelivered(-1));    // connection refused
+    CHECK(!HttpTransport::isDelivered(-11));   // read timeout
+  }
+
+  SECTION("Gateway: over HTTP a denied tag is delivered, not retried forever");
+  {
+    Rig rig(4, 2, TransportKind::Http);
+    rig.gateway->setIdentity("node-1", "");  // direct path: an id, no node_key
+    rig.gateway->begin();
+    rig.transport->setUplinkStatus(422);  // the Cloud's "tag not allowed"
+
+    int      seen    = 0;
+    int      status  = 0;
+    rig.gateway->setResponseHandler([&](const GatewayResponse& r, uint32_t) {
+      seen++;
+      status = r.status;
+    });
+
+    CHECK(rig.gateway->sendTagRead("E2001122"));
+    CHECK(rig.transport->uplinks.size() == 1);
+    // A decision is not a transport failure. It used to be counted as one, put
+    // back on the outbox and re-POSTed every 2 s forever — and every retry wrote
+    // another event row, roughly 43k of them a day for one denied tag.
+    CHECK(rig.gateway->stats().uplinkFailures == 0);
+    CHECK(rig.gateway->pendingCount() == 0);
+    CHECK(rig.gateway->stats().responses == 1);
+    CHECK(seen == 1);
+    CHECK(status == 422);
+
+    // And it stays delivered: nothing re-sends it on later iterations.
+    rig.spin(30);
+    CHECK(rig.transport->uplinks.size() == 1);
+  }
+
+  SECTION("Gateway: over HTTP the round trip is measured, as on the MQTT arm");
+  {
+    Rig rig(4, 2, TransportKind::Http);
+    rig.gateway->setIdentity("node-1", "");
+    rig.gateway->begin();
+    rig.transport->setUplinkStatus(200);
+    rig.transport->uplinkCostMs = 65;  // the POST blocks for this long
+
+    uint32_t reported = 0;
+    rig.gateway->setResponseHandler(
+        [&](const GatewayResponse&, uint32_t latencyMs) { reported = latencyMs; });
+
+    CHECK(rig.gateway->sendTagRead("E2001122"));
+    // The in-flight slot has to be armed *before* the send, because the answer
+    // arrives inside it. Armed after, both of these read zero.
+    CHECK(reported == 65);
+    CHECK(rig.gateway->stats().lastLatencyMs == 65);
+  }
+
+  SECTION("Gateway: over HTTP a transport failure still queues the read");
+  {
+    Rig rig(4, 2, TransportKind::Http);
+    rig.gateway->setIdentity("node-1", "");
+    rig.gateway->begin();
+    rig.transport->failUplink = true;
+    rig.transport->setUplinkStatus(0);  // never got a status back
+
+    CHECK(!rig.gateway->sendTagRead("E2001122"));
+    CHECK(rig.gateway->stats().uplinkFailures == 1);
+    CHECK(rig.gateway->pendingCount() == 1);
+    CHECK(rig.gateway->stats().responses == 0);
+
+    // The slot was armed before the send and has to be released again, or the
+    // read that is already on the outbox would also be reported lost 8 s later.
+    rig.spin(30);
+    CHECK(rig.gateway->stats().responsesLost == 0);
+  }
+
+  SECTION("Gateway: the MQTT arm has no synchronous answer to consume");
+  {
+    Rig rig;
+    rig.gateway->setIdentity("node-1", "key");
+    rig.gateway->begin();
+
+    CHECK(rig.gateway->sendTagRead("E2001122"));
+    // The PUBLISH succeeding says nothing about the decision: that arrives later
+    // on the responses topic, so the read is still in flight here.
+    CHECK(rig.gateway->stats().responses == 0);
+    CHECK(!rig.gateway->sendTagRead("E2003344"));  // slot busy, second read queues
+    CHECK(rig.gateway->pendingCount() == 1);
   }
 
   g_serialMuted = false;

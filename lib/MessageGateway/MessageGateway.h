@@ -123,6 +123,15 @@ class MessageGateway {
   const Stats& stats() const { return stats_; }
   uint8_t      pendingCount() const { return static_cast<uint8_t>(outbox_.size()); }
 
+  /**
+   * Whether a read that cannot go out right now is kept or dropped.
+   *
+   * Callers log the two outcomes differently: with the outbox disabled, "queued"
+   * would be a lie. Serial-only bring-up (MESSAGE_GATEWAY=0) is the case that
+   * matters — see makeGatewayConfig() in src/main.cpp.
+   */
+  bool storeAndForwardEnabled() const { return cfg_.outboxCapacity > 0; }
+
  private:
   struct Subscription {
     String       topic;
@@ -143,6 +152,7 @@ class MessageGateway {
   bool     readyToTransmit() const;
   void     handleMessage(const String& topic, const String& payload);
   void     handleResponse(const String& payload);
+  void     completeRead(const GatewayResponse& response);
   bool     transmit(const String& tag, uint8_t attempts, String* payloadOut = nullptr);
   void     flushOutbox();
   void     expireInFlight();

@@ -222,6 +222,14 @@ which is what makes them comparable: running the same tags through MQTT and then
 HTTPS measures what the Fog layer costs and what it buys. That comparison is the
 quantitative evidence the thesis is missing.
 
+Both arms are instrumented, which until v0.2 only one of them was. MQTT's answer arrives
+later, on `…/responses`; HTTPS returns it from the POST itself. A transport that can answer
+synchronously reports the status through `TransportMode::uplinkStatus()`, and
+`MessageGateway::transmit` feeds it into the same `completeRead` the MQTT answer goes
+through — so both arms produce an access decision, a `responses` count and a round trip
+measured the same way. The in-flight slot is armed *before* the send for exactly this
+reason: over HTTPS the answer is already back by the time `sendUplink` returns.
+
 ---
 
 ## 6. Testing
@@ -234,14 +242,17 @@ on the host:
 ```
 
 It covers the debounce cache, the R200 frame decoder (including the two bugs that used to
-live there), the UID helpers, and — against a hand-driven `FakeTransport` — the uplink's
-behaviour across a reconnection, the outbox retry policy and pacing, the registration state
+live there), the UID helpers, the per-UID debounce that turns reader output into gateway
+traffic, and — against a hand-driven `FakeTransport` — the uplink's behaviour across a
+reconnection on both transports, the outbox retry policy and pacing, the registration state
 machine and the access-decision classification.
 
 A second binary pins the wire contract itself: the real `GatewayMessages.cpp` against the
 real ArduinoJson, asserting the exact payloads the node publishes and what it accepts and
-rejects from the gateway. It is built only when ArduinoJson is available, so the suite
-above keeps running on a machine that has never used PlatformIO.
+rejects from the gateway. It needs ArduinoJson, and without it the run **fails**: the first
+binary parses with a hand-written stand-in that duplicates the field names, so it cannot
+tell a correct contract from an unchecked one. `ALLOW_SKIP_CODEC=1` accepts that trade
+explicitly for a machine that has never used PlatformIO.
 
 In that first binary two collaborators are substituted rather than faked in earnest: the
 JSON codec (so it needs nothing but a compiler — the second binary is what covers the real
