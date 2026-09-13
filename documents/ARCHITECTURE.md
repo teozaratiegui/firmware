@@ -59,8 +59,16 @@ the Wi-Fi stack is up.
 ### `src/config/app_config.h`
 
 Every compile-time knob in one file: run mode, transport, pins, timings, topic prefixes,
-broker address, GPIO for the access decision. Most have an `#ifndef` guard so they can be
-overridden from `platformio.ini` with `build_flags` without editing the file.
+broker address, GPIO for the access decision.
+
+Two kinds live here and they are not interchangeable. The `#define`s carry an `#ifndef`
+guard, so `build_flags` or `PLATFORMIO_BUILD_FLAGS` override them without editing the file;
+the `static constexpr` values (timings, capacities, `kUnansweredReadRetries`,
+`kRevalidateIdentityOnBoot`) have no such guard and a `-D` for one of them is a compile
+error, not an override. The README's *Feature toggles* section splits them by that line.
+
+The EPC length is deliberately absent: it belongs to the reader, so `R200::kEpcLength` owns
+it and every UID buffer derives its length from there.
 
 ### `src/net/connectivity.{h,cpp}`
 
@@ -130,7 +138,8 @@ in RAM, so it survives a broker or Wi-Fi outage but not a reboot.
 "Cannot go out" covers three cases, not one: the link is down, the node has no credentials
 the gateway would accept, or **an earlier read is still waiting for its answer**. That last
 one is what paces the uplink to a single read in flight. The gateway's answer carries no
-tag (`core/contracts/gateway.py:43-59`), so the in-flight slot is the only thing pairing a
+tag (its `NodeResponse`, see the gateway repository's `doc/node-manual.md` §
+"Response (gateway publica)"), so the in-flight slot is the only thing pairing a
 response with the read that caused it — and a backlog that drained in one burst overwrote
 that slot on every send, which reported one real round trip and zeroes for the rest, and
 put only the last read of the burst back on the outbox while the others disappeared
@@ -161,6 +170,11 @@ is validated against what actually arrived before it is used as an index anywher
 Fixed-capacity table of UID → last accepted timestamp, with per-UID cooldown and
 LRU eviction. No allocation, no `std::` container: it has to be predictable on a
 microcontroller.
+
+Capacity and UID length are both template parameters, and a UID arrives as a reference to
+an array of exactly that length — so a buffer of the wrong size is a build error rather
+than a read past the end of it. The cooldown arithmetic is unsigned and survives the
+`millis()` rollover; the LRU comparison is not, and says so in a comment.
 
 ---
 

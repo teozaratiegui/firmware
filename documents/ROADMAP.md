@@ -66,11 +66,12 @@ first tests.
   timeout on every call.
 
 **Tests**
-- `test/native/` — 189 checks, runnable with nothing but a C++ compiler: the cache, the
-  frame decoder, the UID helpers, and — against a hand-driven `FakeTransport` — the
-  uplink's behaviour across a reconnection, the outbox retry policy, the registration state
-  machine and the access-decision classification.
-- A second binary, 61 more checks, builds the real `GatewayMessages.cpp` against the real
+- `test/native/` — 233 checks, runnable with nothing but a C++ compiler: the cache
+  (including the cooldown across the `millis()` rollover), the frame decoder, the command
+  frames the driver emits, `linkTest()`, the UID helpers, and — against a hand-driven
+  `FakeTransport` — the uplink's behaviour across a reconnection, the outbox retry policy,
+  the registration state machine and the access-decision classification.
+- A second binary, 73 more checks, builds the real `GatewayMessages.cpp` against the real
   ArduinoJson and asserts the exact bytes of the wire contract. It is built only when
   ArduinoJson is present (`pio run` once, or set `ARDUINOJSON_DIR`); without it the suite
   above still runs and the codec tests are skipped.
