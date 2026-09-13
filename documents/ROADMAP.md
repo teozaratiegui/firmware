@@ -76,7 +76,11 @@ first tests.
   gateway loses its node table instead of waiting for the next tag.
 
 **Contract**
-- The MQTT payload is `{"tag","node_key","ts"}` — what the gateway parses.
+- The MQTT payload is `{"tag","node_key","ts","event_id"}`. The gateway parses the first
+  two and drops the rest; `ts` and `event_id` travel so that forwarding them upstream
+  (findings G1 and G3) stays a gateway-only change. Both are minted when the read is
+  accepted and stay put across its retries, so a read that waited in the outbox is still
+  dated when it was taken.
 - Responses on `…/responses` are parsed, not just printed: status, message, error,
   round-trip time, and a GPIO pulse when one is configured.
 - Telemetry moved off the ingest topic onto `…/<node_id>/telemetry`, falling back to
@@ -118,13 +122,13 @@ first tests.
   timeout on every call.
 
 **Tests**
-- `test/native/` — 296 checks, runnable with nothing but a C++ compiler: the cache
+- `test/native/` — 345 checks, runnable with nothing but a C++ compiler: the cache
   (including the cooldown across the `millis()` rollover), the frame decoder, the command
   frames the driver emits, `linkTest()`, the UID helpers, the per-UID debounce, and —
   against a hand-driven `FakeTransport` — the uplink's behaviour across a reconnection on
   both transports, the outbox retry policy, the registration state machine and the
   access-decision classification.
-- A second binary, 73 more checks, builds the real `GatewayMessages.cpp` against the real
+- A second binary, 88 more checks, builds the real `GatewayMessages.cpp` against the real
   ArduinoJson and asserts the exact bytes of the wire contract. It is built only when
   ArduinoJson is present (`pio run` once, or set `ARDUINOJSON_DIR`); without it the run
   **fails** rather than reporting a green suite that never checked the contract — pass

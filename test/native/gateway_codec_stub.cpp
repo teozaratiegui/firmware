@@ -95,16 +95,20 @@ RegisterCredentials RegisterCredentials::parse(const String& json) {
 
 namespace messages {
 
-String tagRead(const String& tag, const String& nodeKey, const String& iso8601) {
+String tagRead(const String& tag, const String& nodeKey, const String& iso8601,
+               const String& eventId) {
   String out = String("{") + quoted("tag", tag) + "," + quoted("node_key", nodeKey);
   if (!iso8601.isEmpty()) out = out + "," + quoted("ts", iso8601);
+  if (!eventId.isEmpty()) out = out + "," + quoted("event_id", eventId);
   return out + "}";
 }
 
-String httpTagEvent(const String& tag, const String& nodeId, const String& iso8601) {
+String httpTagEvent(const String& tag, const String& nodeId, const String& iso8601,
+                    const String& eventId) {
   String out = String("{") + quoted("tag", tag);
   if (!nodeId.isEmpty()) out = out + "," + quoted("nodeId", nodeId);
   if (!iso8601.isEmpty()) out = out + "," + quoted("timestamp", iso8601);
+  if (!eventId.isEmpty()) out = out + "," + quoted("eventId", eventId);
   return out + "}";
 }
 
@@ -123,7 +127,14 @@ String telemetry(const NodeTelemetry& t) {
                ",\"uplink_failures\":" + String(static_cast<unsigned long>(t.uplinkFailures)) +
                ",\"reads_abandoned\":" + String(static_cast<unsigned long>(t.readsAbandoned)) +
                "," + quoted("provisioning", String(t.provisioning)) +
-               ",\"register_attempts\":" + String(static_cast<unsigned long>(t.registerAttempts));
+               ",\"register_attempts\":" + String(static_cast<unsigned long>(t.registerAttempts)) +
+               ",\"tags_accepted\":" + String(static_cast<unsigned long>(t.tagsAccepted)) +
+               ",\"queued\":" + String(static_cast<unsigned long>(t.queued)) +
+               ",\"dropped\":" + String(static_cast<unsigned long>(t.dropped)) +
+               ",\"responses\":" + String(static_cast<unsigned long>(t.responses)) +
+               ",\"responses_lost\":" + String(static_cast<unsigned long>(t.responsesLost)) +
+               ",\"last_rtt_ms\":" + String(static_cast<unsigned long>(t.lastLatencyMs)) +
+               "," + quoted("clock", String(t.clockSynced ? "ntp" : "unset"));
   return out + "}";
 }
 

@@ -2,6 +2,7 @@
 // what happens to a tag read the gateway never answers.
 #include "test_support.h"
 
+#include <ctime>
 #include <memory>
 #include <string>
 #include <vector>
@@ -16,6 +17,21 @@ constexpr const char kPresenceTopic[] = "esp/AA:BB:CC:DD:EE:FF/status";
 constexpr const char kRequestsTopic[] = "esp/node-1/requests";
 constexpr const char kResponsesTopic[] = "esp/node-1/responses";
 
+// One wall clock, the way the node has one: on the device `ts` and the event id
+// are both rendered from the same `time()`, so a test that moves this moves
+// both. Keeping them on separate test clocks would have hidden the very thing
+// the "a queued read is dated when it was taken" section checks.
+//
+// It moves independently of millis() because that is exactly the condition a
+// read has to survive: the retry leaves later than the read did, and neither
+// half of its identity may notice.
+constexpr uint64_t kBaseEpochMs = 1789300802000ULL;  // 2026-09-13T12:00:02Z
+uint64_t           g_epochMs    = kBaseEpochMs;
+
+uint64_t fakeEpochMs() {
+  return g_epochMs;
+}
+
 // Counts how many times the node asks for the wall clock, which is how the
 // double serialisation of a tag read shows up from the outside: two calls a few
 // milliseconds apart can straddle a second boundary, so the payload logged to
@@ -24,7 +40,24 @@ unsigned g_isoCalls = 0;
 
 String countingIso() {
   g_isoCalls++;
-  return String("2026-09-12T00:00:00Z");
+  if (g_epochMs == 0) return String();  // same "no clock, no timestamp" policy as net::
+  const std::time_t secs = static_cast<std::time_t>(g_epochMs / 1000);
+  std::tm utc{};
+  gmtime_r(&secs, &utc);
+  char buffer[24];
+  std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc);
+  return String(buffer);
+}
+
+/** The "event_id":"..." / "eventId":"..." value in a payload, or "" if absent. */
+std::string eventIdOf(const String& payload) {
+  for (const char* key : {"\"event_id\":\"", "\"eventId\":\""}) {
+    const std::size_t at = payload.s_.find(key);
+    if (at == std::string::npos) continue;
+    const std::size_t from = at + std::string(key).size();
+    return payload.s_.substr(from, payload.s_.find('"', from) - from);
+  }
+  return std::string();
 }
 
 struct Rig {
@@ -33,7 +66,8 @@ struct Rig {
 
   explicit Rig(uint8_t outboxCapacity = 4, uint8_t unansweredRetries = 2,
                TransportKind kind = TransportKind::Mqtt) {
-    g_millis = 1000;
+    g_millis  = 1000;
+    g_epochMs = kBaseEpochMs;
 
     MessageGateway::Config cfg;
     cfg.nodePrefix        = "esp";
@@ -45,6 +79,7 @@ struct Rig {
     cfg.outboxRetryMs     = 2000;
     cfg.unansweredReadRetries = unansweredRetries;
     cfg.isoTimeFn             = &countingIso;
+    cfg.epochMsFn             = &fakeEpochMs;
 
     std::unique_ptr<FakeTransport> owned(new FakeTransport(kind));
     transport = owned.get();
@@ -300,7 +335,7 @@ void testGateway() {
     CHECK(published == rig.transport->uplinks[0].payload);
     CHECK(contains(published, "\"tag\":\"E2001122\""));
     CHECK(contains(published, "\"node_key\":\"key\""));
-    CHECK(contains(published, "\"ts\":\"2026-09-12T00:00:00Z\""));
+    CHECK(contains(published, "\"ts\":\"2026-09-13T12:00:02Z\""));
   }
 
   SECTION("Gateway: a queued read hands back no payload, because none went out");
@@ -430,6 +465,135 @@ void testGateway() {
     rig.spin(2, 5);
     CHECK(rig.transport->uplinks.size() == 2);
     CHECK(contains(rig.transport->uplinks[1].payload, "\"tag\":\"BBB\""));
+  }
+
+  SECTION("Gateway: a retried read keeps the event id it was born with");
+  {
+    // The point of the id is that the Cloud can tell "this read again" from
+    // "another read". If the retry minted a fresh one, the conditional write in
+    // the events table would let it through and one physical read would end up
+    // as three rows — which is the duplicate count the experiment is trying to
+    // measure in the first place.
+    Rig rig(4, 2, TransportKind::Http);
+    rig.gateway->setIdentity("bench-7a", "");
+    rig.gateway->begin();
+    rig.transport->setUplinkStatus(0);  // nobody answers
+
+    CHECK(rig.gateway->sendTagRead("E2001122"));
+    g_epochMs += 9000;  // the retries leave nine seconds later
+    rig.spin(60);
+
+    CHECK(rig.transport->uplinks.size() == 3);
+    const std::string first = eventIdOf(rig.transport->uplinks[0].payload);
+    CHECK(!first.empty());
+    CHECK(eventIdOf(rig.transport->uplinks[1].payload) == first);
+    CHECK(eventIdOf(rig.transport->uplinks[2].payload) == first);
+  }
+
+  SECTION("Gateway: two reads are two events, and they sort in order");
+  {
+    Rig rig(4, 0, TransportKind::Http);
+    rig.gateway->setIdentity("bench-7a", "");
+    rig.gateway->begin();
+
+    CHECK(rig.gateway->sendTagRead("E2001122"));
+    g_epochMs += 5000;
+    CHECK(rig.gateway->sendTagRead("E2003344"));
+
+    const std::string first  = eventIdOf(rig.transport->uplinks[0].payload);
+    const std::string second = eventIdOf(rig.transport->uplinks[1].payload);
+    CHECK(first != second);
+    // Lexicographic order is chronological order: that is what the 13-digit
+    // zero-padded prefix buys, and what the Cloud's range query relies on.
+    CHECK(first < second);
+    // Two reads inside one second are still two events, still in order.
+    CHECK(rig.gateway->sendTagRead("E2005566"));
+    CHECK(eventIdOf(rig.transport->uplinks[2].payload) > second);
+  }
+
+  SECTION("Gateway: a queued read is dated when it was taken, not when it got through");
+  {
+    // `ts` has to be pinned to the read exactly as the event id is. It used to
+    // be rebuilt inside buildTagPayload, so every retransmission re-stamped it
+    // and a read held in the outbox reached the Cloud claiming it happened when
+    // it was last retried. scan-tag.js stores `clientTimestamp` verbatim from
+    // whichever attempt the conditional write lets in, so the row would have
+    // carried the retry time — and the reads that go through the outbox are the
+    // whole population the outage experiment is about.
+    Rig rig(4, 2, TransportKind::Http);
+    rig.gateway->setIdentity("bench-7a", "");
+    rig.gateway->begin();
+    rig.transport->setUplinkStatus(0);  // nobody answers
+
+    CHECK(rig.gateway->sendTagRead("E2001122"));
+    g_epochMs += 8000;  // the retries leave eight and sixteen seconds later
+    rig.spin(60);
+
+    CHECK(rig.transport->uplinks.size() == 3);
+    CHECK(contains(rig.transport->uplinks[0].payload, "\"timestamp\":\"2026-09-13T12:00:02Z\""));
+    CHECK(contains(rig.transport->uplinks[1].payload, "\"timestamp\":\"2026-09-13T12:00:02Z\""));
+    CHECK(contains(rig.transport->uplinks[2].payload, "\"timestamp\":\"2026-09-13T12:00:02Z\""));
+    // And a read taken *after* the clock moved is dated then, so the pinning is
+    // per read and not a clock that stopped.
+    rig.transport->setUplinkStatus(200);
+    CHECK(rig.gateway->sendTagRead("E2003344"));
+    CHECK(contains(rig.transport->uplinks.back().payload,
+                   "\"timestamp\":\"2026-09-13T12:00:10Z\""));
+  }
+
+  SECTION("Gateway: the event id sorts in order past the tenth read of a second");
+  {
+    // The sequence is zero padded, and this is why: the sort key is compared as
+    // text, so "…-10" filed before "…-9" would put a tag's tenth read of that
+    // second ahead of its ninth for good. Two reads of one tag inside a second
+    // need a cache eviction to happen at all, but the id has to be orderable
+    // whether or not that is rare.
+    Rig rig(4, 0, TransportKind::Http);
+    rig.gateway->setIdentity("bench-7a", "");
+    rig.gateway->begin();
+
+    std::string previous;
+    for (int i = 0; i < 12; ++i) {
+      char tag[16];
+      snprintf(tag, sizeof(tag), "E200%04d", i);
+      CHECK(rig.gateway->sendTagRead(tag));
+      rig.transport->deliver("esp/node-1/responses", "{\"status\":200}");
+      const std::string current = eventIdOf(rig.transport->uplinks.back().payload);
+      CHECK(current > previous);  // strictly increasing, every step, same second
+      previous = current;
+    }
+  }
+
+  SECTION("Gateway: the MQTT arm names its reads too");
+  {
+    // The other sections drive the direct arm because it answers synchronously.
+    // This is the productive path, and buildTagPayload picks the field name off
+    // the transport, so the gateway's spelling needs its own assertion.
+    Rig rig(4, 0, TransportKind::Mqtt);
+    rig.gateway->setIdentity("node-1", "key");
+    rig.gateway->begin();
+
+    String published;
+    CHECK(rig.gateway->sendTagRead("E2001122", &published));
+    CHECK(contains(published, "\"event_id\":\""));
+    CHECK(!contains(published, "\"eventId\""));  // that spelling belongs to the Lambda
+    CHECK(eventIdOf(published) == eventIdOf(rig.transport->uplinks[0].payload));
+  }
+
+  SECTION("Gateway: no clock means no event id, not an invented one");
+  {
+    // Same policy as `ts`. A node that booted before the AP came up has no wall
+    // clock, and an id prefixed with a fabricated epoch would sort its events
+    // into the wrong place in the tag's history for good.
+    Rig rig(4, 0, TransportKind::Http);
+    rig.gateway->setIdentity("bench-7a", "");
+    rig.gateway->begin();
+    g_epochMs = 0;
+
+    CHECK(rig.gateway->sendTagRead("E2001122"));
+    CHECK(eventIdOf(rig.transport->uplinks[0].payload).empty());
+    // No clock, no timestamp either — one policy, not two.
+    CHECK(!contains(rig.transport->uplinks[0].payload, "timestamp"));
   }
 
   SECTION("Gateway: outboxCapacity = 0 disables store-and-forward safely");

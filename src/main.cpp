@@ -58,6 +58,7 @@ MessageGateway::Config makeGatewayConfig() {
   config.unansweredReadRetries = kUnansweredReadRetries;
   config.millisFn          = &millisProvider;
   config.isoTimeFn         = &net::isoTimestamp;
+  config.epochMsFn         = &net::epochMillis;
   return config;
 }
 
@@ -168,5 +169,5 @@ void loop() {
   }
 #endif
 
-  node->telemetry.loop(node->processor.tagPresent());
+  node->telemetry.loop(node->processor.tagPresent(), node->processor.accepted());
 }

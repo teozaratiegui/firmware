@@ -1,5 +1,7 @@
 #include "MessageGateway.h"
 
+#include <cstdio>
+
 MessageGateway::MessageGateway(std::unique_ptr<TransportMode> transport, Config config)
     : transport_(std::move(transport)), cfg_(std::move(config)) {
   outbox_.reserve(cfg_.outboxCapacity);
@@ -11,6 +13,36 @@ uint32_t MessageGateway::now() const {
 
 String MessageGateway::isoNow() const {
   return cfg_.isoTimeFn ? cfg_.isoTimeFn() : String();
+}
+
+// A stable name for one physical read, shaped the way the Cloud wants a sort
+// key: <13-digit epoch ms>#<MAC tail>-<sequence>.
+//
+// Stability is the whole point. The same read, retried out of the outbox, has
+// to carry the same id or the retry lands as a second row in the events table
+// — which is exactly the duplicate that makes a "how many events per read"
+// measurement meaningless. So it is minted once, when the read is accepted, and
+// travels with it through the queue.
+//
+// The epoch half has one-second resolution because the node's clock does; the
+// sequence is what separates two reads inside the same second. It is zero
+// padded for the same reason the epoch is: the sort key is compared as text, so
+// an unpadded counter would file read 10 before read 9 inside that second. Six
+// digits is past any plausible uptime at the reader's 5 s per-UID cooldown.
+// An unset clock yields no id at all, the same policy `ts` follows: the
+// alternative is inventing a time.
+String MessageGateway::nextEventId() {
+  const uint64_t epochMs = cfg_.epochMsFn ? cfg_.epochMsFn() : 0;
+  if (epochMs == 0) return String();
+
+  String tail = cfg_.mac;
+  tail.replace(":", "");
+  if (tail.length() > 6) tail = tail.substring(tail.length() - 6);
+
+  char id[48];
+  snprintf(id, sizeof(id), "%013llu#%s-%06lu", static_cast<unsigned long long>(epochMs),
+           tail.c_str(), static_cast<unsigned long>(++readSeq_));
+  return String(id);
 }
 
 // ── Topics ───────────────────────────────────────────────────────────────────
@@ -215,9 +247,10 @@ void MessageGateway::completeRead(const GatewayResponse& response) {
 
 // ── Tag reads ────────────────────────────────────────────────────────────────
 
-String MessageGateway::buildTagPayload(const String& tag) const {
-  return isMqtt() ? messages::tagRead(tag, nodeKey_, isoNow())
-                  : messages::httpTagEvent(tag, nodeId_, isoNow());
+String MessageGateway::buildTagPayload(const String& tag, const String& iso8601,
+                                       const String& eventId) const {
+  return isMqtt() ? messages::tagRead(tag, nodeKey_, iso8601, eventId)
+                  : messages::httpTagEvent(tag, nodeId_, iso8601, eventId);
 }
 
 // True when a read can go out right now. Over MQTT that means more than "the
@@ -233,21 +266,27 @@ bool MessageGateway::sendTagRead(const String& tag, String* payloadOut) {
   if (payloadOut) *payloadOut = String();
   if (tag.isEmpty()) return false;
 
+  // Minted here and nowhere else: this is the one place a *new* read enters the
+  // system, so it is the one place that may name one, or say when it happened.
+  // Everything downstream carries the name and the instant it was given.
+  const PendingRead read{tag, isoNow(), nextEventId(), 0};
+
   if (!readyToTransmit()) {
-    enqueue(tag, 0, /*requeue=*/false);
+    enqueue(read, /*requeue=*/false);
     return false;
   }
-  if (!transmit(tag, 0, payloadOut)) {
-    enqueue(tag, 0, /*requeue=*/false);
+  if (!transmit(read, payloadOut)) {
+    enqueue(read, /*requeue=*/false);
     return false;
   }
   return true;
 }
 
-bool MessageGateway::transmit(const String& tag, uint8_t attempts, String* payloadOut) {
+bool MessageGateway::transmit(const PendingRead& read, String* payloadOut) {
   if (!transport_) return false;
 
-  const String payload = buildTagPayload(tag);
+  const String& tag     = read.tag;
+  const String  payload = buildTagPayload(tag, read.iso8601, read.eventId);
 
   // One read in flight at a time, and callers must not overwrite the slot: the
   // gateway's answer carries no tag (core/contracts/gateway.py:43-59), so the
@@ -262,7 +301,9 @@ bool MessageGateway::transmit(const String& tag, uint8_t attempts, String* paylo
   // direct arm with nothing to pair its answer against and no round trip to
   // measure.
   inFlightTag_      = tag;
-  inFlightAttempts_ = static_cast<uint8_t>(attempts + 1);
+  inFlightIso_      = read.iso8601;
+  inFlightEventId_  = read.eventId;
+  inFlightAttempts_ = static_cast<uint8_t>(read.attempts + 1);
   inFlightSinceMs_  = now();
   inFlight_         = true;
 
@@ -292,7 +333,9 @@ bool MessageGateway::transmit(const String& tag, uint8_t attempts, String* paylo
 
 // Bounded, RAM-only store-and-forward: survives a broker or Wi-Fi outage, not a
 // reboot. Persisting it to NVS/LittleFS is the documented next step.
-void MessageGateway::enqueue(const String& tag, uint8_t attempts, bool requeue) {
+void MessageGateway::enqueue(const PendingRead& read, bool requeue) {
+  const String& tag      = read.tag;
+  const uint8_t attempts = read.attempts;
   // A capacity of zero means "no store-and-forward at all"; without this the
   // full-queue branch below would erase from an empty vector.
   if (cfg_.outboxCapacity == 0) {
@@ -304,7 +347,7 @@ void MessageGateway::enqueue(const String& tag, uint8_t attempts, bool requeue) 
     stats_.tagReadsDropped++;
     Serial.println("[GW] outbox full — oldest tag read dropped.");
   }
-  outbox_.push_back(PendingRead{tag, attempts});
+  outbox_.push_back(read);
   stats_.tagReadsQueued++;
   if (requeue) {
     Serial.printf("[GW] tag %s unanswered, requeued (attempt %u of %u, %u pending).\n",
@@ -338,7 +381,7 @@ void MessageGateway::flushOutbox() {
   // One per attempt: draining the whole queue at once would stall the superloop
   // exactly when the link has just come back.
   const PendingRead pending = outbox_.front();
-  if (!transmit(pending.tag, pending.attempts)) return;
+  if (!transmit(pending)) return;
   outbox_.erase(outbox_.begin());
   Serial.printf("[GW] queued tag relayed (%u left).\n", static_cast<unsigned>(outbox_.size()));
 
@@ -362,7 +405,8 @@ void MessageGateway::expireInFlight() {
                 static_cast<unsigned>(cfg_.responseTimeoutMs));
 
   if (inFlightAttempts_ <= cfg_.unansweredReadRetries) {
-    enqueue(inFlightTag_, inFlightAttempts_, /*requeue=*/true);
+    enqueue(PendingRead{inFlightTag_, inFlightIso_, inFlightEventId_, inFlightAttempts_},
+            /*requeue=*/true);
     return;
   }
 

@@ -25,6 +25,7 @@ class MessageGateway {
   using ResponseHandler = std::function<void(const GatewayResponse&, uint32_t latencyMs)>;
   using MillisFn        = uint32_t (*)();
   using IsoTimeFn       = String (*)();
+  using EpochMsFn       = uint64_t (*)();  // 0 while the clock is unset
 
   struct Config {
     String      nodePrefix        = "esp";
@@ -44,6 +45,10 @@ class MessageGateway {
     uint8_t     unansweredReadRetries = 2;
     MillisFn    millisFn          = nullptr;
     IsoTimeFn   isoTimeFn         = nullptr;  // empty String until NTP syncs
+    // Wall clock in milliseconds, used to mint the event id. Without it reads
+    // go out unnamed, which is the same policy `ts` follows: no clock, no
+    // timestamp, and no pretending otherwise.
+    EpochMsFn   epochMsFn         = nullptr;
   };
 
   struct Stats {
@@ -117,8 +122,18 @@ class MessageGateway {
   String registerTopic() const;
   String registerResponseTopic() const;
 
-  /** The JSON sendTagRead publishes for one tag, per the transport's contract. */
-  String buildTagPayload(const String& tag) const;
+  /**
+   * The JSON sendTagRead publishes for one tag, per the transport's contract.
+   *
+   * `iso8601` and `eventId` both belong to the read, not to this call: they are
+   * minted when the read is accepted and stay the same across its retries.
+   * Asking the clock here instead would re-stamp `ts` on every retransmission,
+   * so a read held in the outbox would reach the Cloud claiming it happened
+   * when it was last retried — which is the one number the outage experiment is
+   * trying to measure. Empty means the clock was unset when the read arrived.
+   */
+  String buildTagPayload(const String& tag, const String& iso8601,
+                         const String& eventId) const;
 
   const Stats& stats() const { return stats_; }
   uint8_t      pendingCount() const { return static_cast<uint8_t>(outbox_.size()); }
@@ -139,24 +154,30 @@ class MessageGateway {
   };
 
   // A queued read carries how many times it has already been put on the wire, so
-  // the retry budget belongs to the read and not to the queue.
+  // the retry budget belongs to the read and not to the queue; the instant it
+  // was taken, so time spent in the queue does not rewrite when it happened; and
+  // the id it was born with, so a retry is recognisable upstream as the same
+  // event rather than as a second one.
   // No default member initialiser: the Arduino core still compiles this as
   // C++11, where that would stop PendingRead being an aggregate.
   struct PendingRead {
     String  tag;
+    String  iso8601;
+    String  eventId;
     uint8_t attempts;
   };
 
   uint32_t now() const;
   String   isoNow() const;
+  String   nextEventId();
   bool     readyToTransmit() const;
   void     handleMessage(const String& topic, const String& payload);
   void     handleResponse(const String& payload);
   void     completeRead(const GatewayResponse& response);
-  bool     transmit(const String& tag, uint8_t attempts, String* payloadOut = nullptr);
+  bool     transmit(const PendingRead& read, String* payloadOut = nullptr);
   void     flushOutbox();
   void     expireInFlight();
-  void     enqueue(const String& tag, uint8_t attempts, bool requeue);
+  void     enqueue(const PendingRead& read, bool requeue);
   void     applyTopics();
   void     trackLink();
   void     refreshLastWill();
@@ -171,7 +192,10 @@ class MessageGateway {
   ResponseHandler                onResponse_;
   Stats                          stats_;
   String                         inFlightTag_;
+  String                         inFlightIso_;
+  String                         inFlightEventId_;
   uint8_t                        inFlightAttempts_ = 0;
+  uint32_t                       readSeq_          = 0;
   uint32_t                       inFlightSinceMs_ = 0;
   uint32_t                       nextFlushAtMs_   = 0;
   uint32_t                       linkGeneration_  = 0;

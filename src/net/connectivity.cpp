@@ -120,4 +120,9 @@ String isoTimestamp() {
   return String(buffer);
 }
 
+uint64_t epochMillis() {
+  if (!clockSynced()) return 0;
+  return static_cast<uint64_t>(time(nullptr)) * 1000ULL;
+}
+
 }  // namespace net

@@ -30,4 +30,13 @@ bool clockSynced();
 /** UTC ISO-8601 (e.g. 2026-09-12T14:03:07Z), or "" while the clock is unset. */
 String isoTimestamp();
 
+/**
+ * Wall-clock epoch in milliseconds, or 0 while the clock is unset.
+ *
+ * The node has no sub-second time source, so the millisecond half is always
+ * zero and this is honest about it: it is a second-resolution clock expressed
+ * in the unit the Cloud event id is built in, not invented precision.
+ */
+uint64_t epochMillis();
+
 }  // namespace net

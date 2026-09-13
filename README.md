@@ -176,8 +176,8 @@ Or your IDE's **PlatformIO: Upload** and **Serial Monitor** actions.
 [PROV] registered as node_id=node-3f9a1c04
 [GW/MQTT] subscribed bicicletero/esp/node-3f9a1c04/responses
 [APP] ready.
-[TELEMETRY] up=30s wifi=up ip=192.168.49.51 rssi=-54 heap=213480 node=node-3f9a1c04 tag_present=0 sent=0 queued=0 dropped=0 lost=0 abandoned=0 prov=registered/1 last_rtt=0ms clock=ntp
-[RFID] tag relayed {"tag":"E28006900000500E88C6A4A7","node_key":"…","ts":"2026-09-12T14:03:07Z"}
+[TELEMETRY] up=30s wifi=up ip=192.168.49.51 rssi=-54 heap=213480 node=node-3f9a1c04 tag_present=0 accepted=0 sent=0 queued=0 dropped=0 responses=0 lost=0 abandoned=0 prov=registered/1 last_rtt=0ms clock=ntp
+[RFID] tag relayed {"tag":"E28006900000500E88C6A4A7","node_key":"…","ts":"2026-09-12T14:03:07Z","event_id":"1789300802000#123456-000001"}
 [ACCESS] status=200 (access allowed) rtt=184 ms message=Access allowed
 ```
 
@@ -195,7 +195,9 @@ On a second boot the two `[PROV]` lines before `registered` are replaced by
 | Reads in flight | **one**; the next read waits for the gateway's answer | `lib/MessageGateway/` |
 | Unanswered read | retried **2×** (`kUnansweredReadRetries`) after **8 s** (`kResponseTimeoutMs`), then counted in `abandoned` | `lib/MessageGateway/` |
 | Offline queue | **16** reads (`kOutboxCapacity`), **in RAM** — survives an outage, not a reboot | `lib/MessageGateway/` |
+| Read identity | each read is named once when it is accepted — `ts` plus `event_id` (`<13-digit epoch ms>#<MAC tail>-<seq>`) — and keeps both through every retry, so a queued read is still dated when it was taken and its retries are one event upstream, not three. No clock, neither field | `lib/MessageGateway/` |
 | Telemetry | every **30 s** (`kTelemetryIntervalMs`), on `…/<node_id>/telemetry` | `src/app/` |
+| Measurement counters | in that same message: `tags_accepted` (reads the debounce let through), `tag_reads` (transmission **attempts** — a retried read adds three), `queued`, `dropped`, `responses`, `responses_lost`, `last_rtt_ms`, `clock` | `src/app/` |
 | Presence | retained `{"online":…}` on `…/<MAC>/status`, also the last will | `lib/MessageGateway/` |
 | A `403` from the gateway | wipes the stored credentials and re-registers | `src/provisioning/` |
 

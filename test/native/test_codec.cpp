@@ -66,14 +66,45 @@ int main() {
     CHECK(!contains(payload, "ts"));
   }
 
+  SECTION("codec: a tag read carries the event id the Fog will need for G3");
+  {
+    // The gateway reads neither field today, and both travel anyway: the day it
+    // forwards an idempotency key, the key is already there and already in the
+    // shape the Lambda wants, so that fix stays a pass-through.
+    const String payload =
+        messages::tagRead("E280110C", "a1b2c3", "2026-09-12T14:03:07Z", "1789300802000#DDEEFF-41");
+    CHECK(equals(payload,
+                 "{\"tag\":\"E280110C\",\"node_key\":\"a1b2c3\","
+                 "\"ts\":\"2026-09-12T14:03:07Z\",\"event_id\":\"1789300802000#DDEEFF-41\"}"));
+    // And it is omitted, not emptied, when the clock never answered.
+    CHECK(!contains(messages::tagRead("E280110C", "a1b2c3", "", ""), "event_id"));
+  }
+
   SECTION("codec: the direct-to-Lambda payload uses the Cloud's own field names");
   {
-    const String payload = messages::httpTagEvent("E280110C", "bench-7a", "2026-09-12T14:03:07Z");
-    CHECK(equals(
-        payload,
-        "{\"tag\":\"E280110C\",\"nodeId\":\"bench-7a\",\"timestamp\":\"2026-09-12T14:03:07Z\"}"));
-    // Both optional fields drop out cleanly rather than going out as "".
-    CHECK(equals(messages::httpTagEvent("E280110C", "", ""), "{\"tag\":\"E280110C\"}"));
+    const String payload = messages::httpTagEvent("E280110C", "bench-7a", "2026-09-12T14:03:07Z",
+                                                  "1789300802000#DDEEFF-41");
+    CHECK(equals(payload,
+                 "{\"tag\":\"E280110C\",\"nodeId\":\"bench-7a\","
+                 "\"timestamp\":\"2026-09-12T14:03:07Z\","
+                 "\"eventId\":\"1789300802000#DDEEFF-41\"}"));
+    // Every optional field drops out cleanly rather than going out as "".
+    CHECK(equals(messages::httpTagEvent("E280110C", "", "", ""), "{\"tag\":\"E280110C\"}"));
+  }
+
+  SECTION("codec: the event id is in the shape the Lambda can sort on");
+  {
+    // domain/event.js uses the id verbatim as the DynamoDB sort key when it
+    // matches /^\d{13}#.+$/ — a fixed-width epoch is what makes a range query
+    // over one tag mean a time range. A node id that failed this shape would
+    // still deduplicate, but its events would fall out of every time window.
+    const String payload =
+        messages::httpTagEvent("E280110C", "bench-7a", "", "1789300802000#DDEEFF-41");
+    JsonDocument doc;
+    CHECK(deserializeJson(doc, payload.c_str()) == DeserializationError::Ok);
+    const std::string id = doc["eventId"].as<const char*>();
+    CHECK(id.size() > 14 && id[13] == '#');
+    CHECK(id.find_first_not_of("0123456789") == 13);
   }
 
   SECTION("codec: a registration request is keyed by MAC");
@@ -109,6 +140,72 @@ int main() {
     CHECK(contains(payload, "\"register_attempts\":3"));
     CHECK(contains(payload, "\"wifi\":\"up\""));
     CHECK(contains(payload, "\"provisioning\":\"registered\""));
+  }
+
+  SECTION("codec: telemetry carries the numbers a measurement run reads");
+  {
+    // These used to exist only as a Serial.printf, which put every quantity the
+    // experiment needs behind a USB cable.
+    //
+    // Nothing consumes this message yet — the gateway has no telemetry handler
+    // (finding G7), and the reduction scripts in docs/validacion/ read the
+    // serial line, not this JSON. So these names are pinned here rather than by
+    // a downstream parser failing, and they are deliberately the serial line's
+    // names where the two overlap.
+    NodeTelemetry t;
+    t.nodeId        = "node-1";
+    t.tagsAccepted  = 41;
+    t.tagReads      = 43;   // three attempts for one retried read
+    t.queued        = 2;
+    t.dropped       = 1;
+    t.responses     = 39;
+    t.responsesLost = 2;
+    t.lastLatencyMs = 184;
+    t.clockSynced   = true;
+
+    const String payload = messages::telemetry(t);
+    CHECK(contains(payload, "\"tags_accepted\":41"));
+    CHECK(contains(payload, "\"tag_reads\":43"));
+    CHECK(contains(payload, "\"queued\":2"));
+    CHECK(contains(payload, "\"dropped\":1"));
+    CHECK(contains(payload, "\"responses\":39"));
+    CHECK(contains(payload, "\"responses_lost\":2"));
+    CHECK(contains(payload, "\"last_rtt_ms\":184"));
+    CHECK(contains(payload, "\"clock\":\"ntp\""));
+
+    t.clockSynced = false;
+    CHECK(contains(messages::telemetry(t), "\"clock\":\"unset\""));
+  }
+
+  SECTION("codec: telemetry still fits in the MQTT buffer");
+  {
+    // PubSubClient publishes nothing at all — silently — past its buffer. What
+    // it compares against that buffer is not the payload but the whole packet:
+    // MQTT_MAX_HEADER_SIZE + 2 + strlen(topic) + payload. Asserting on the
+    // payload alone would leave the topic's worth of bytes unguarded, which is
+    // the part that grows when the topic prefix is renamed. Telemetry is the
+    // largest message the node sends and it just grew by seven fields, so this
+    // is the guard rail.
+    //
+    // MqttTransport::Config::bufferSize, and the longest topic this message can
+    // go out on — the MAC form, used until the node has a node_id.
+    NodeTelemetry t;
+    t.nodeId       = "node-3f9a1c04";
+    t.mac          = "AA:BB:CC:DD:EE:FF";
+    t.ip           = "192.168.49.75";
+    t.firmware     = "0.2.0";
+    t.mode         = "rfid";
+    t.provisioning = "registered";
+    t.uptimeS = t.freeHeap = t.tagReads = t.uplinkFailures = 4294967295u;
+    t.readsAbandoned = t.tagsAccepted = t.queued = t.dropped = 4294967295u;
+    t.responses = t.responsesLost = t.lastLatencyMs = 4294967295u;
+
+    constexpr unsigned kMqttBufferSize    = 1024;
+    constexpr unsigned kMqttMaxHeaderSize = 5;
+    const std::string  topic = "bicicletero/esp/AA:BB:CC:DD:EE:FF/telemetry";
+    const unsigned     overhead =
+        kMqttMaxHeaderSize + 2 + static_cast<unsigned>(topic.size());
+    CHECK(messages::telemetry(t).length() + overhead < kMqttBufferSize);
   }
 
   SECTION("codec: a value that needs escaping is escaped, not truncated");

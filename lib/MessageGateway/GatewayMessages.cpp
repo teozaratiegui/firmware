@@ -47,25 +47,36 @@ RegisterCredentials RegisterCredentials::parse(const String& json) {
 
 namespace messages {
 
-String tagRead(const String& tag, const String& nodeKey, const String& iso8601) {
+String tagRead(const String& tag, const String& nodeKey, const String& iso8601,
+               const String& eventId) {
   JsonDocument doc;
   doc["tag"]      = tag;
   doc["node_key"] = nodeKey;
   // The gateway ignores unknown fields today (it only reads tag and node_key),
-  // so the client timestamp travels at no cost and is ready the day the Fog
-  // forwards it upstream (gateway finding G1).
+  // so both of these travel at no cost and are ready the day the Fog forwards
+  // them upstream (gateway findings G1 and G3). `event_id` is deliberately in
+  // the exact shape the Lambda wants as an idempotency key, so that fix is a
+  // pass-through on the Fog side rather than a decision about key formats.
   if (!iso8601.isEmpty()) doc["ts"] = iso8601;
+  if (!eventId.isEmpty()) doc["event_id"] = eventId;
 
   String out;
   serializeJson(doc, out);
   return out;
 }
 
-String httpTagEvent(const String& tag, const String& nodeId, const String& iso8601) {
+String httpTagEvent(const String& tag, const String& nodeId, const String& iso8601,
+                    const String& eventId) {
   JsonDocument doc;
   doc["tag"] = tag;
   if (!nodeId.isEmpty()) doc["nodeId"] = nodeId;
   if (!iso8601.isEmpty()) doc["timestamp"] = iso8601;
+  // On this arm the key is not decoration: the node's own outbox retries an
+  // unanswered read, and without a stable id each retry would be a separate row
+  // in the events table. With it, the duplicate count for the direct arm is a
+  // measurement of the Cloud's conditional write rather than of the retry
+  // policy.
+  if (!eventId.isEmpty()) doc["eventId"] = eventId;
 
   String out;
   serializeJson(doc, out);
@@ -98,6 +109,16 @@ String telemetry(const NodeTelemetry& t) {
   doc["reads_abandoned"] = t.readsAbandoned;
   doc["provisioning"]      = t.provisioning;
   doc["register_attempts"] = t.registerAttempts;
+  // Measurement fields. Order matters only for the reader's eyes; the gateway
+  // has no telemetry handler at all today (finding G7), so the audience is a
+  // passive mosquitto_sub and the reduction scripts behind it.
+  doc["tags_accepted"]   = t.tagsAccepted;
+  doc["queued"]          = t.queued;
+  doc["dropped"]         = t.dropped;
+  doc["responses"]       = t.responses;
+  doc["responses_lost"]  = t.responsesLost;
+  doc["last_rtt_ms"]     = t.lastLatencyMs;
+  doc["clock"]           = t.clockSynced ? "ntp" : "unset";
 
   String out;
   serializeJson(doc, out);

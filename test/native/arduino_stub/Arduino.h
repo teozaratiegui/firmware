@@ -63,6 +63,19 @@ class String {
   const char* c_str() const { return s_.c_str(); }
   void reserve(unsigned n) { s_.reserve(n); }
   void toUpperCase();
+  /** Arduino's in-place replace; used to strip the colons out of a MAC. */
+  void replace(const char* from, const char* to) {
+    if (!from || !*from || !to) return;
+    const std::string needle(from);
+    const std::string patch(to);
+    for (std::size_t at = s_.find(needle); at != std::string::npos;
+         at = s_.find(needle, at + patch.size())) {
+      s_.replace(at, needle.size(), patch);
+    }
+  }
+  String substring(unsigned from) const {
+    return from >= s_.size() ? String() : String(s_.substr(from));
+  }
   String& operator+=(char c) { s_ += c; return *this; }
   String& operator+=(const char* c) { s_ += c; return *this; }
   String& operator+=(const String& o) { s_ += o.s_; return *this; }

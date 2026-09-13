@@ -17,7 +17,7 @@ R200 driver            resync on header, read the declared length, verify the ch
 TagProcessor           per-UID cooldown (5 s) so a tag left in the field is not replayed
   │  "E28006900000500E88C6A4A7"
   ▼
-MessageGateway         {"tag":…,"node_key":…,"ts":…}  →  <prefix>/<node_id>/requests
+MessageGateway         {"tag":…,"node_key":…,"ts":…,"event_id":…}  →  <prefix>/<node_id>/requests
   │                    queues the read instead of losing it when the link is down
   ▼
 Fog gateway → Cloud
@@ -184,9 +184,9 @@ With `kNodePrefix = "bicicletero/esp"` and `kGatewayPrefix = "bicicletero/gatewa
 
 | Topic | Direction | Payload |
 | --- | --- | --- |
-| `…/esp/<node_id>/requests` | node → gateway | `{"tag","node_key","ts"}` |
+| `…/esp/<node_id>/requests` | node → gateway | `{"tag","node_key","ts","event_id"}` — `ts` and `event_id` are omitted, not emptied, while the clock is unset |
 | `…/esp/<node_id>/responses` | gateway → node | `{"status","message"?,"error"?}` |
-| `…/esp/<node_id>/telemetry` | node → *(nobody yet)* | uptime, heap, RSSI, IP, counters, provisioning state |
+| `…/esp/<node_id>/telemetry` | node → *(nobody yet)* | uptime, heap, RSSI, IP, provisioning state, and the measurement counters: `tags_accepted`, `tag_reads`, `queued`, `dropped`, `responses`, `responses_lost`, `last_rtt_ms`, `clock` |
 | `…/esp/<MAC>/telemetry` | node → *(nobody yet)* | the same, while the node has no `node_id` |
 | `…/esp/<MAC>/status` | node → *(nobody yet)*, retained | `{"online":true\|false}`, also the last will |
 | `…/gateway/register` | node → gateway | `{"api_key","mac"}` |
