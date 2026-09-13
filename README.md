@@ -298,6 +298,13 @@ against the real ArduinoJson is built automatically if ArduinoJson is on disk (r
 `pio run` once, or set `ARDUINOJSON_DIR`). See
 [test/native/README.md](test/native/README.md) for what is covered and what is not.
 
+> **Check that both binaries ran.** The behaviour binary asserts against a hand-written
+> parser (`gateway_codec_stub.cpp`), so it stays green even if a field name in the real
+> `GatewayMessages.cpp` changes — only the codec binary catches that. The script currently
+> exits 0 when the codec binary is skipped for want of ArduinoJson, which makes "the
+> contract is fine" look exactly like "the contract was not checked". Tracked in
+> [documents/ROADMAP.md](documents/ROADMAP.md#known-defects-found-2026-09-13).
+
 ---
 
 ## Documentation in this repo

@@ -5,6 +5,55 @@ behaviour can still change.
 
 ---
 
+## Known defects, found 2026-09-13
+
+A cross-layer review of the Edge and Cloud repositories turned these up. They are recorded
+here rather than fixed in place so the fix and its regression test land together.
+
+- **The HTTP transport treats a business answer as a transport failure.**
+  `HttpTransport::isAccepted` accepts only `200`/`201`/`204`, so a `404` (unknown tag) or a
+  `422` (denied tag) — both perfectly normal answers — are reported as a failed send. The
+  read goes back to the outbox and is retried every `outboxRetryMs` indefinitely, and the
+  Lambda writes a fresh event row for each attempt because the discriminator is random. One
+  denied tag is on the order of 43 000 rows a day. The MQTT path is unaffected: there
+  `sendUplink` returns the PUBLISH result and the decision arrives on `/responses`.
+  *Fix:* treat any well-formed HTTP answer as delivered, and keep the access decision
+  separate from transport success.
+
+- **The HTTP arm of the A/B bench measures nothing.** `HttpTransport` never calls
+  `dispatch()`, so `MessageGateway::handleResponse` never runs: `AccessIndicator` never
+  fires, `stats_.lastLatencyMs` stays at zero, and the in-flight slot is only armed
+  `if (isMqtt())`. `HttpTransport::lastStatus()` is exposed but has no caller — the gateway
+  holds a `TransportMode`, which has no such method. This blocks the v0.3 bullet about
+  comparing MQTT against HTTPS: only one arm is instrumented. The POST is synchronous, so
+  the fix is small — dispatch a synthetic `{"status":<code>}` on the uplink topic after the
+  POST and drop the `isMqtt()` guard on the in-flight slot.
+
+- **`MESSAGE_GATEWAY=0` does not disable the uplink, it only disconnects it.** The flag is
+  documented as serial-only bring-up, but the read path in `main.cpp` is guarded by
+  `SYSTEM_MODE` alone, so every read still reaches `MessageGateway::sendTagRead` and is
+  queued. From read 17 on, bring-up prints `outbox full — oldest tag read dropped` — an
+  error that is not an error, in the mode used to diagnose hardware.
+
+- **`test/native/run.sh` cannot distinguish "the contract is fine" from "the contract was
+  not checked".** The script exits 0 when ArduinoJson is missing and the codec binary is
+  skipped, and `set -e` means a failure in the behaviour binary stops the codec binary from
+  being built at all. Renaming `node_key` to `nodeKey` in the real `GatewayMessages.cpp`
+  leaves the 233-check behaviour binary **green**, because those assertions run against
+  `gateway_codec_stub.cpp`, a hand-written parser that duplicates the field names.
+  *Fix:* fail, or at least do not exit 0, when the codec binary could not be built, unless
+  skipping is asked for explicitly.
+
+- **Two pieces of behaviour have no coverage and one of them was a shipped bug.** The
+  Wi-Fi rising edge that arms SNTP (`net/connectivity.cpp`) was the high-severity defect of
+  the previous review — a node that boots before the AP has no clock for its whole uptime
+  and silently sends every read without `ts` — and it was fixed without a regression test;
+  the file is not compiled into the suite. `src/rfid/tag_processing.cpp` (the per-UID
+  debounce, a capability the thesis claims) has no coverage either, and it already compiles
+  natively with the includes `run.sh` uses.
+
+---
+
 ## v0.2 — current
 
 Bringing the node in line with the contract the Fog gateway actually implements, plus the

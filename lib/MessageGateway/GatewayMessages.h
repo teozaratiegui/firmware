@@ -31,7 +31,8 @@
 //      RegisterResponse in core/contracts/gateway.py.
 //  Cloud (HTTPS), node -> Lambda Function URL (Fog bypassed):
 //      {"tag":"<epc>","nodeId":"<id>","timestamp":"<iso8601>"}
-//      IaC-multi-tenant-system, the access_control handler's index.js.
+//      IaC-multi-tenant-system, the access_control tag-scan handler
+//      (src/handlers/tag-scan.js; it also accepts node_id and ts as aliases).
 // -----------------------------------------------------------------------------
 
 /** Answer published by the gateway on <node prefix>/<node_id>/responses. */
